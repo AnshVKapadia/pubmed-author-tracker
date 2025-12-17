@@ -1,0 +1,15 @@
+# secrets / credentials
+*.json
+config/service_account.json
+data/state.json
+
+# outputs
+out/
+logs/
+
+# python junk
+__pycache__/
+*.pyc
+.venv/
+.env
+.DS_Store

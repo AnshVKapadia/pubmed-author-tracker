@@ -1,0 +1,11 @@
+spreadsheet_id: "14IW4BQOp9lN1f32Hn_tZKWv0fzF0AzeTvptzpetDnWQ"
+timezone: "America/Chicago"
+use_openalex_citations: true
+use_google_scholar: false
+run_dates: ["01-01", "04-01", "07-01", "10-01"]
+run_time_local: "09:00"
+
+# Optional but recommended for NCBI rate limits:
+ncbi_tool: "pubmed-30-authors-bot"
+ncbi_email: "avprojects11@gmail.com"
+ncbi_api_key: "c5d8e7bb20fedab407a281d69174815a7908"
