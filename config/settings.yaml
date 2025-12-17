@@ -8,4 +8,4 @@ run_time_local: "09:00"
 # Optional but recommended for NCBI rate limits:
 ncbi_tool: "pubmed-30-authors-bot"
 ncbi_email: "avprojects11@gmail.com"
-ncbi_api_key: "c5d8e7bb20fedab407a281d69174815a7908"
+ncbi_api_key: 
