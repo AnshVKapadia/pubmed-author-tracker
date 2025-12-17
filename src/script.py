@@ -11,12 +11,19 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 import gspread
 from google.oauth2.service_account import Credentials
 
+EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+
 from dotenv import load_dotenv
 load_dotenv()
 api_key = os.getenv("NCBI_API_KEY")
 google_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
-
-EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+if not api_key:
+    print("Warning: NCBI_API_KEY not set; PubMed requests will use lower rate limits.")
+if not google_json:
+    raise RuntimeError(
+        "Missing GOOGLE_APPLICATION_CREDENTIALS_JSON. "
+        "Set it in your local .env (for local runs) or as a GitHub Actions secret."
+    )
 
 
 # -------------------- TIME HELPERS --------------------
@@ -146,7 +153,7 @@ def efetch_details(pmids: List[str], tool, email, api_key) -> List[Dict[str, Any
 
 def connect_gsheets() -> gspread.Client:
     creds = Credentials.from_service_account_info(
-        json.loads(os.environ["GOOGLE_APPLICATION_CREDENTIALS_JSON"]),
+        json.loads(google_json),
         scopes=[
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive",
@@ -188,14 +195,14 @@ def main():
             build_query(a["name"], a.get("affiliation"), mindate, maxdate),
             settings.get("ncbi_tool"),
             settings.get("ncbi_email"),
-            settings.get("ncbi_api_key"),
+            api_key,
         )
 
         new_pmids = [p for p in pmids if p not in seen]
         details = efetch_details(new_pmids,
                                  settings.get("ncbi_tool"),
                                  settings.get("ncbi_email"),
-                                 settings.get("ncbi_api_key"))
+                                 api_key)
 
         for d in details:
             d["tracked_author"] = a["name"]
