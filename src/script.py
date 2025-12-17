@@ -11,6 +11,10 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 import gspread
 from google.oauth2.service_account import Credentials
 
+from dotenv import load_dotenv
+load_dotenv()
+api_key = os.getenv("NCBI_API_KEY")
+google_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
 
 EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 
