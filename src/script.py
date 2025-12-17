@@ -174,6 +174,19 @@ def write_df_to_worksheet(sh, title: str, df: pd.DataFrame):
     ws.freeze(rows=1)
     ws.set_basic_filter()
 
+def write_meta_to_worksheet(sh):
+    meta_value = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+    try:
+        meta_ws = sh.worksheet("Meta")
+    except gspread.WorksheetNotFound:
+        meta_ws = sh.add_worksheet(title="Meta", rows=10, cols=5)
+
+    if meta_ws.acell("A1").value != "last_updated_utc":
+        meta_ws.update("A1", "last_updated_utc")
+
+    meta_ws.update("B1", meta_value)
+
 
 # -------------------- MAIN --------------------
 
@@ -226,6 +239,8 @@ def main():
             author,
             df[df["tracked_author"] == author]
         )
+    
+    write_meta_to_worksheet(sh)
 
     state["last_run_utc"] = now.isoformat()
     state["seen_pmids"] = sorted(seen)
