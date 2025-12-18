@@ -1,53 +1,47 @@
 - name: "Kapadia V"
-  affiliation:
+  affiliation_keywords:
     - "UT Southwestern"
     - "UTSW"
     - "University of Texas Southwestern"
     - "University of Texas Southwestern Medical Center"
     - "The University of Texas Southwestern Medical Center"
-  orcid: "0000-0001-7862-5869"
 
 - name: "Wyckoff M"
-  affiliation:
+  affiliation_keywords:
     - "UT Southwestern"
     - "UTSW"
     - "University of Texas Southwestern"
     - "University of Texas Southwestern Medical Center"
     - "The University of Texas Southwestern Medical Center"
-  orcid: "0000-0003-0483-0346"
 
 - name: "Ortigoza E"
-  affiliation:
+  affiliation_keywords:
     - "UT Southwestern"
     - "UTSW"
     - "University of Texas Southwestern"
     - "University of Texas Southwestern Medical Center"
     - "The University of Texas Southwestern Medical Center"
-  orcid: "0000-0001-8227-7529"
 
 - name: "Leon R"
-  affiliation:
+  affiliation_keywords:
     - "UT Southwestern"
     - "UTSW"
     - "University of Texas Southwestern"
     - "University of Texas Southwestern Medical Center"
     - "The University of Texas Southwestern Medical Center"
-  orcid: "0000-0001-9193-675X"
 
 - name: "Kakkilaya V"
-  affiliation:
+  affiliation_keywords:
     - "UT Southwestern"
     - "UTSW"
     - "University of Texas Southwestern"
     - "University of Texas Southwestern Medical Center"
     - "The University of Texas Southwestern Medical Center"
-  orcid: "0000-0002-5337-5610"
 
 - name: "Makkar A"
-  affiliation:
+  affiliation_keywords:
     - "UT Southwestern"
     - "UTSW"
     - "University of Texas Southwestern"
     - "University of Texas Southwestern Medical Center"
     - "The University of Texas Southwestern Medical Center"
-  orcid: "0000-0003-4654-0566"

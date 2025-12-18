@@ -98,21 +98,12 @@ def save_state(path: str, state: Dict[str, Any]) -> None:
 
 # -------------------- PUBMED QUERY --------------------
 
-def build_query(author_name: str, affiliations: Optional[List[str]], mindate: str, maxdate: str) -> str:
-    parts = [f'"{author_name}"[Author]']
+def build_query(author_name: str, mindate: str, maxdate: str) -> str:
+    return (
+        f'"{author_name}"[Author] '
+        f'AND ("{mindate}"[EDAT] : "{maxdate}"[EDAT])'
+    )
 
-    if affiliations:
-        aff_terms = [
-            f'"{aff.strip()}"[Affiliation]'
-            for aff in affiliations
-            if aff.strip()
-        ]
-        if aff_terms:
-            parts.append("(" + " OR ".join(aff_terms) + ")")
-
-    parts.append(f'("{mindate}"[EDAT] : "{maxdate}"[EDAT])')
-
-    return " AND ".join(parts)
 
 @retry(
     reraise=True,
@@ -146,31 +137,87 @@ def _text(node: Optional[ET.Element]) -> str:
     return node.text.strip() if node is not None and node.text else ""
 
 
-def efetch_details(pmids: List[str], tool, email, api_key) -> List[Dict[str, Any]]:
+def extract_affiliations(article: ET.Element) -> List[str]:
+    return [
+        (aff.text or "").strip()
+        for aff in article.findall(".//Affiliation")
+        if aff.text
+    ]
+
+
+def efetch_details(
+    pmids: List[str],
+    affiliation_keywords: List[str],
+    tool: Optional[str],
+    email: Optional[str],
+    api_key: Optional[str],
+) -> List[Dict[str, Any]]:
+
     if not pmids:
         return []
 
-    rows = []
-    for i in range(0, len(pmids), 200):
-        chunk = pmids[i:i+200]
+    url = f"{EUTILS_BASE}/efetch.fcgi"
+    rows: List[Dict[str, Any]] = []
+
+    chunk_size = 200  # safe batch size for efetch
+
+    for i in range(0, len(pmids), chunk_size):
+        chunk = pmids[i : i + chunk_size]
+
         params = {
             "db": "pubmed",
             "id": ",".join(chunk),
             "retmode": "xml",
         }
-        if tool: params["tool"] = tool
-        if email: params["email"] = email
-        if api_key: params["api_key"] = api_key
+        if tool:
+            params["tool"] = tool
+        if email:
+            params["email"] = email
+        if api_key:
+            params["api_key"] = api_key
 
-        xml_text = http_get(f"{EUTILS_BASE}/efetch.fcgi", params).text
+        xml_text = http_get(url, params).text
         root = ET.fromstring(xml_text)
 
         for article in root.findall(".//PubmedArticle"):
+
+            # ------------------ AFFILIATION FILTER ------------------
+
+            affiliations = [
+                (aff.text or "").strip()
+                for aff in article.findall(".//Affiliation")
+                if aff.text
+            ]
+
+            # Decide whether this article matches
+            match = any(
+                kw.lower() in aff.lower()
+                for kw in affiliation_keywords
+                for aff in affiliations
+            )
+
+            # ---- DEBUG: print why we are skipping ----
+            if not match:
+                pmid_dbg = _text(article.find(".//PMID"))  # safe even before row creation
+                if not affiliations:
+                    print(f"[SKIP] PMID {pmid_dbg}: NO affiliations in XML")
+                else:
+                    print(f"[SKIP] PMID {pmid_dbg}: affiliation mismatch")
+                    for aff in affiliations:
+                        print("   -", aff)
+                    print("   keywords:", affiliation_keywords)
+                continue
+
+
+            # ------------------ BASIC METADATA ------------------
+
             pmid = _text(article.find(".//PMID"))
             title = _text(article.find(".//ArticleTitle"))
             journal = _text(article.find(".//Journal/Title"))
+
             pub_year = _text(article.find(".//PubDate/Year"))
 
+            # Authors
             authors = []
             for a in article.findall(".//Author"):
                 last = _text(a.find("LastName"))
@@ -178,10 +225,12 @@ def efetch_details(pmids: List[str], tool, email, api_key) -> List[Dict[str, Any
                 if last:
                     authors.append(f"{last} {init}".strip())
 
+            # DOI
             doi = ""
             for aid in article.findall(".//ArticleId"):
-                if aid.attrib.get("IdType") == "doi":
+                if aid.attrib.get("IdType", "").lower() == "doi":
                     doi = _text(aid)
+                    break
 
             rows.append({
                 "pmid": pmid,
@@ -190,11 +239,11 @@ def efetch_details(pmids: List[str], tool, email, api_key) -> List[Dict[str, Any
                 "pub_year": pub_year,
                 "doi": doi,
                 "authors": "; ".join(authors),
-                "pubmed_url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+                "pubmed_url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
+                "matched_affiliations": " | ".join(affiliations),
             })
 
     return rows
-
 
 # -------------------- GOOGLE SHEETS --------------------
 
@@ -260,7 +309,6 @@ def main():
         pmids = esearch_pmids(
             build_query(
                 a["name"],
-                a.get("affiliation", []),
                 mindate,
                 maxdate
             ),
@@ -270,10 +318,13 @@ def main():
         )
 
         new_pmids = [p for p in pmids if p not in seen]
-        details = efetch_details(new_pmids,
-                                 settings.get("ncbi_tool"),
-                                 settings.get("ncbi_email"),
-                                 api_key)
+        details = efetch_details(
+            new_pmids,
+            affiliation_keywords=a.get("affiliation_keywords", []),
+            tool=settings.get("ncbi_tool"),
+            email=settings.get("ncbi_email"),
+            api_key=api_key,
+        )
 
         for d in details:
             d["tracked_author"] = a["name"]
