@@ -1,7 +1,7 @@
 # secrets / credentials
 *.json
 config/service_account.json
-data/state.json
+# data/state.json
 .env
 
 # outputs
