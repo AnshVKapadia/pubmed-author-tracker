@@ -59,12 +59,11 @@ def save_state(path: str, state: Dict[str, Any]) -> None:
 
 # -------------------- PUBMED QUERY --------------------
 
-def build_query(author_name: str, affiliation: Optional[str], mindate: str, maxdate: str) -> str:
-    parts = [f'"{author_name}"[Author]']
-    if affiliation and affiliation.strip():
-        parts.append(f'"{affiliation.strip()}"[Affiliation]')
-    parts.append(f'("{mindate}"[Date - Publication] : "{maxdate}"[Date - Publication])')
-    return " AND ".join(parts)
+def build_query(author_name: str, mindate: str, maxdate: str) -> str:
+    return (
+        f'"{author_name}"[Author] '
+        f'AND ("{mindate}"[EDAT] : "{maxdate}"[EDAT])'
+    )
 
 
 @retry(
@@ -188,9 +187,9 @@ def write_meta_to_worksheet(sh):
         meta_ws = sh.add_worksheet(title="Meta", rows=10, cols=5)
 
     if meta_ws.acell("A1").value != "last_updated_utc":
-        meta_ws.update("A1", [["last_updated_utc"]])
+        meta_ws.update(range_name="A1", values=[["last_updated_utc"]])
 
-    meta_ws.update("B1", [[meta_value]])
+    meta_ws.update(range_name="B1", values=[[meta_value]])
 
 
 # -------------------- MAIN --------------------
@@ -210,7 +209,7 @@ def main():
 
     for a in authors:
         pmids = esearch_pmids(
-            build_query(a["name"], a.get("affiliation"), mindate, maxdate),
+            build_query(a["name"], mindate, maxdate),
             settings.get("ncbi_tool"),
             settings.get("ncbi_email"),
             api_key,
