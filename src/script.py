@@ -25,6 +25,45 @@ if not google_json:
         "Set it in your local .env (for local runs) or as a GitHub Actions secret."
     )
 
+# ------------------ USER INPUT HELPERS -------------------
+
+def is_interactive_run() -> bool:
+    # GitHub Actions sets CI=true
+    return os.getenv("CI", "").lower() != "true"
+
+def get_date_window(state: dict) -> tuple[str, str]:
+    """
+    Decide whether to use state.json or a user-provided start date.
+    Returns (mindate, maxdate) in YYYY/MM/DD format.
+    """
+
+    now = datetime.now(timezone.utc)
+
+    # Default: use state.json
+    last_run = iso_to_utc_dt(state["last_run_utc"])
+
+    if is_interactive_run():
+        choice = input(
+            "Use saved state.json for date range? (Y/n): "
+        ).strip().lower()
+
+        if choice == "n":
+            user_input = input(
+                "Enter start date (YYYY-MM-DD or full ISO): "
+            ).strip()
+
+            try:
+                if "T" in user_input:
+                    last_run = iso_to_utc_dt(user_input)
+                else:
+                    last_run = datetime.fromisoformat(user_input).replace(
+                        tzinfo=timezone.utc
+                    )
+            except ValueError:
+                raise ValueError("Invalid date format.")
+
+    return ymd(last_run), ymd(now)
+
 
 # -------------------- TIME HELPERS --------------------
 
@@ -191,7 +230,6 @@ def write_meta_to_worksheet(sh):
 
     meta_ws.update(range_name="B1", values=[[meta_value]])
 
-
 # -------------------- MAIN --------------------
 
 def main():
@@ -199,10 +237,10 @@ def main():
     settings = load_yaml("config/settings.yaml")
 
     state = load_state("data/state.json")
-    last_run = iso_to_utc_dt(state["last_run_utc"])
+    #last_run = iso_to_utc_dt(state["last_run_utc"])
     now = datetime.now(timezone.utc)
 
-    mindate, maxdate = ymd(last_run), ymd(now)
+    mindate, maxdate = get_date_window(state)
 
     seen = set(state["seen_pmids"])
     all_rows = []
