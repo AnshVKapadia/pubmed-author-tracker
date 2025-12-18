@@ -27,42 +27,42 @@ if not google_json:
 
 # ------------------ USER INPUT HELPERS -------------------
 
-def is_interactive_run() -> bool:
-    # GitHub Actions sets CI=true
-    return os.getenv("CI", "").lower() != "true"
+# def is_interactive_run() -> bool:
+#     # GitHub Actions sets CI=true
+#     return os.getenv("CI", "").lower() != "true"
 
-def get_date_window(state: dict) -> tuple[str, str]:
-    """
-    Decide whether to use state.json or a user-provided start date.
-    Returns (mindate, maxdate) in YYYY/MM/DD format.
-    """
+# def get_date_window(state: dict) -> tuple[str, str]:
+#     """
+#     Decide whether to use state.json or a user-provided start date.
+#     Returns (mindate, maxdate) in YYYY/MM/DD format.
+#     """
 
-    now = datetime.now(timezone.utc)
+#     now = datetime.now(timezone.utc)
 
-    # Default: use state.json
-    last_run = iso_to_utc_dt(state["last_run_utc"])
+#     # Default: use state.json
+#     last_run = iso_to_utc_dt(state["last_run_utc"])
 
-    if is_interactive_run():
-        choice = input(
-            "Use saved state.json for date range? (Y/n): "
-        ).strip().lower()
+#     if is_interactive_run():
+#         choice = input(
+#             "Use saved state.json for date range? (Y/n): "
+#         ).strip().lower()
 
-        if choice == "n":
-            user_input = input(
-                "Enter start date (YYYY-MM-DD or full ISO): "
-            ).strip()
+#         if choice == "n":
+#             user_input = input(
+#                 "Enter start date (YYYY-MM-DD or full ISO): "
+#             ).strip()
 
-            try:
-                if "T" in user_input:
-                    last_run = iso_to_utc_dt(user_input)
-                else:
-                    last_run = datetime.fromisoformat(user_input).replace(
-                        tzinfo=timezone.utc
-                    )
-            except ValueError:
-                raise ValueError("Invalid date format.")
+#             try:
+#                 if "T" in user_input:
+#                     last_run = iso_to_utc_dt(user_input)
+#                 else:
+#                     last_run = datetime.fromisoformat(user_input).replace(
+#                         tzinfo=timezone.utc
+#                     )
+#             except ValueError:
+#                 raise ValueError("Invalid date format.")
 
-    return ymd(last_run), ymd(now)
+#     return ymd(last_run), ymd(now)
 
 
 # -------------------- TIME HELPERS --------------------
@@ -98,12 +98,21 @@ def save_state(path: str, state: Dict[str, Any]) -> None:
 
 # -------------------- PUBMED QUERY --------------------
 
-def build_query(author_name: str, mindate: str, maxdate: str) -> str:
-    return (
-        f'"{author_name}"[Author] '
-        f'AND ("{mindate}"[EDAT] : "{maxdate}"[EDAT])'
-    )
+def build_query(author_name: str, affiliations: Optional[List[str]], mindate: str, maxdate: str) -> str:
+    parts = [f'"{author_name}"[Author]']
 
+    if affiliations:
+        aff_terms = [
+            f'"{aff.strip()}"[Affiliation]'
+            for aff in affiliations
+            if aff.strip()
+        ]
+        if aff_terms:
+            parts.append("(" + " OR ".join(aff_terms) + ")")
+
+    parts.append(f'("{mindate}"[EDAT] : "{maxdate}"[EDAT])')
+
+    return " AND ".join(parts)
 
 @retry(
     reraise=True,
@@ -237,17 +246,24 @@ def main():
     settings = load_yaml("config/settings.yaml")
 
     state = load_state("data/state.json")
-    #last_run = iso_to_utc_dt(state["last_run_utc"])
     now = datetime.now(timezone.utc)
 
-    mindate, maxdate = get_date_window(state)
+    # --- NON-INTERACTIVE DATE WINDOW (GitHub Actions safe) ---
+    last_run = iso_to_utc_dt(state["last_run_utc"])
+    mindate, maxdate = ymd(last_run), ymd(now)
+
 
     seen = set(state["seen_pmids"])
     all_rows = []
 
     for a in authors:
         pmids = esearch_pmids(
-            build_query(a["name"], mindate, maxdate),
+            build_query(
+                a["name"],
+                a.get("affiliation", []),
+                mindate,
+                maxdate
+            ),
             settings.get("ncbi_tool"),
             settings.get("ncbi_email"),
             api_key,
