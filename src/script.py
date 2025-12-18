@@ -280,12 +280,29 @@ def main():
 
     write_df_to_worksheet(sh, "Master", df)
 
-    for author in df["tracked_author"].unique():
-        write_df_to_worksheet(
-            sh,
-            author,
-            df[df["tracked_author"] == author]
-        )
+    author_names = [a["name"] for a in authors]
+
+    for author in author_names:
+        author_df = df[df["tracked_author"] == author]
+
+        if not author_df.empty:
+            write_df_to_worksheet(sh, author, author_df)
+        else:
+            # Ensure the author sheet exists and is cleared
+            try:
+                ws = sh.worksheet(author)
+                ws.clear()
+                ws.update(
+                    range_name="A1",
+                    values=[["No publications found in this date window."]]
+                )
+            except gspread.WorksheetNotFound:
+                ws = sh.add_worksheet(title=author, rows=5, cols=5)
+                ws.update(
+                    range_name="A1",
+                    values=[["No publications found in this date window."]]
+                )
+
     
     write_meta_to_worksheet(sh)
 
