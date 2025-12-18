@@ -27,7 +27,7 @@ jobs:
           GOOGLE_APPLICATION_CREDENTIALS_JSON: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_JSON }}
           NCBI_API_KEY: ${{ secrets.NCBI_API_KEY }}
         run: |
-          python script.py
+          python src/script.py
 
       - name: Upload outputs
         uses: actions/upload-artifact@v4
