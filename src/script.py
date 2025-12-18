@@ -169,10 +169,15 @@ def write_df_to_worksheet(sh, title: str, df: pd.DataFrame):
         ws = sh.add_worksheet(title=title, rows=1, cols=1)
 
     ws.clear()
+
+    # Always write headers
     ws.update([df.columns.tolist()] + df.fillna("").values.tolist())
 
-    ws.freeze(rows=1)
-    ws.set_basic_filter()
+    # Only freeze header if there is at least one data row
+    if len(df) > 0:
+        ws.freeze(rows=1)
+        ws.set_basic_filter()
+
 
 def write_meta_to_worksheet(sh):
     meta_value = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -183,9 +188,9 @@ def write_meta_to_worksheet(sh):
         meta_ws = sh.add_worksheet(title="Meta", rows=10, cols=5)
 
     if meta_ws.acell("A1").value != "last_updated_utc":
-        meta_ws.update("A1", "last_updated_utc")
+        meta_ws.update("A1", [["last_updated_utc"]])
 
-    meta_ws.update("B1", meta_value)
+    meta_ws.update("B1", [[meta_value]])
 
 
 # -------------------- MAIN --------------------
@@ -223,7 +228,12 @@ def main():
 
         seen.update(new_pmids)
 
-    df = pd.DataFrame(all_rows)
+    expected_cols = [
+        "pmid", "title", "journal", "pub_year", "doi",
+        "authors", "pubmed_url", "tracked_author"
+    ]
+    df = pd.DataFrame(all_rows, columns=expected_cols)
+
     os.makedirs("out", exist_ok=True)
     df.to_csv("out/master.csv", index=False)
 
@@ -247,7 +257,6 @@ def main():
     save_state("data/state.json", state)
 
     print("Run complete: Google Sheet updated.")
-
 
 if __name__ == "__main__":
     main()
