@@ -72,7 +72,7 @@ def save_state(path: str, state: Dict[str, Any]) -> None:
 def build_query(author_name: str, mindate: str, maxdate: str) -> str:
     return (
         f'"{author_name}"[Author] '
-        f'AND ("{mindate}"[EDAT] : "{maxdate}"[EDAT])'
+        f'AND ("{mindate}"[PDAT] : "{maxdate}"[PDAT])'
     )
 
 @retry(
