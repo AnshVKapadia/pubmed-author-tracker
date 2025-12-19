@@ -72,7 +72,7 @@ def save_state(path: str, state: Dict[str, Any]) -> None:
 def build_query(author_name: str, mindate: str, maxdate: str) -> str:
     return (
         f'"{author_name}"[Author] '
-        f'AND ("{mindate}"[EDAT] : "{maxdate}"[EDAT])'
+        f'AND ("{mindate}"[PDAT] : "{maxdate}"[PDAT])'
     )
 
 @retry(
@@ -122,17 +122,29 @@ def efetch_details(
     rows: List[Dict[str, Any]] = []
     url = f"{EUTILS_BASE}/efetch.fcgi"
 
+    # Split "Kapadia V" → last="kapadia", initial="v"
+    try:
+        tracked_last, tracked_initial = tracked_author.split()
+        tracked_last = tracked_last.lower()
+        tracked_initial = tracked_initial.lower()
+    except ValueError:
+        tracked_last = tracked_author.lower()
+        tracked_initial = ""
+
     for i in range(0, len(pmids), 200):
-        chunk = pmids[i:i+200]
+        chunk = pmids[i:i + 200]
 
         params = {
             "db": "pubmed",
             "id": ",".join(chunk),
             "retmode": "xml",
         }
-        if tool: params["tool"] = tool
-        if email: params["email"] = email
-        if api_key: params["api_key"] = api_key
+        if tool:
+            params["tool"] = tool
+        if email:
+            params["email"] = email
+        if api_key:
+            params["api_key"] = api_key
 
         xml_text = http_get(url, params).text
         root = ET.fromstring(xml_text)
@@ -140,19 +152,20 @@ def efetch_details(
         for article in root.findall(".//PubmedArticle"):
             pmid = _text(article.find(".//PMID"))
 
+            # ------------------ AFFILIATIONS ------------------
             affiliations = [
                 (aff.text or "").strip()
                 for aff in article.findall(".//Affiliation")
                 if aff.text
             ]
 
-            match = any(
+            affiliation_match = any(
                 kw.lower() in aff.lower()
                 for kw in affiliation_keywords
                 for aff in affiliations
             )
 
-            if not match:
+            if not affiliation_match:
                 if dbg:
                     if not affiliations:
                         log_write(dbg, f"[SKIP] PMID {pmid}: NO affiliations | tracked={tracked_author}")
@@ -162,24 +175,55 @@ def efetch_details(
                             log_write(dbg, f"   AFF: {aff}")
                 continue
 
-            # OPTIONAL DEBUG: investigator but not author
-            author_names = [
-                f"{_text(a.find('LastName'))} {_text(a.find('Initials'))}".strip()
-                for a in article.findall(".//Author")
-            ]
-            if tracked_author not in author_names and dbg:
-                log_write(dbg, f"[INFO] PMID {pmid}: tracked author NOT in AuthorList")
+            # ------------------ AUTHOR NAME MATCHING ------------------
+            author_elems = article.findall(".//Author")
+
+            author_names = []
+            author_match = False
+
+            for a in author_elems:
+                last = _text(a.find("LastName")).lower()
+                fore = _text(a.find("ForeName")).lower()
+                init = _text(a.find("Initials")).lower()
+
+                if last:
+                    author_names.append(f"{last} {init}".strip())
+
+                # Match logic:
+                # 1. Last name must match
+                # 2. Initial OR forename must align
+                if last == tracked_last:
+                    if tracked_initial and (
+                        init.startswith(tracked_initial)
+                        or fore.startswith(tracked_initial)
+                    ):
+                        author_match = True
+
+            if not author_match:
+                if dbg:
+                    log_write(
+                        dbg,
+                        f"[SKIP] PMID {pmid}: affiliation OK but AUTHOR mismatch | tracked={tracked_author}"
+                    )
+                    log_write(dbg, f"   Authors found: {author_names}")
+                continue
+
+            # ------------------ METADATA ------------------
+            doi = next(
+                (
+                    _text(a)
+                    for a in article.findall(".//ArticleId")
+                    if a.attrib.get("IdType", "").lower() == "doi"
+                ),
+                ""
+            )
 
             rows.append({
                 "pmid": pmid,
                 "title": _text(article.find(".//ArticleTitle")),
                 "journal": _text(article.find(".//Journal/Title")),
                 "pub_year": _text(article.find(".//PubDate/Year")),
-                "doi": next(
-                    (_text(a) for a in article.findall(".//ArticleId")
-                     if a.attrib.get("IdType", "").lower() == "doi"),
-                    ""
-                ),
+                "doi": doi,
                 "authors": "; ".join(author_names),
                 "pubmed_url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
             })
