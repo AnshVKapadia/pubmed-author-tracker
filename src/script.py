@@ -347,7 +347,7 @@ def main():
     df.to_csv("out/master.csv", index=False)
 
     gc = connect_gsheets()
-    sh = gc.open_by_key(settings["spreadsheet_id"])
+    sh = gc.open_by_key(os.getenv("SPREADSHEET_ID"))
 
     write_df_to_worksheet(sh, "Master", df)
 

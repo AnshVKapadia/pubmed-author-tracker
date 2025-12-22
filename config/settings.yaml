@@ -1,5 +1,3 @@
-spreadsheet_id: "14IW4BQOp9lN1f32Hn_tZKWv0fzF0AzeTvptzpetDnWQ"
-
 # Optional but recommended for NCBI rate limits:
 ncbi_tool: "pubmed-30-authors-bot"
 ncbi_email: "avprojects11@gmail.com"
