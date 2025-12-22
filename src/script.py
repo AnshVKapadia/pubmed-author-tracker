@@ -92,7 +92,7 @@ def build_search_name(full_name: str) -> str:
 
 def build_query(author_name: str, mindate: str, maxdate: str) -> str:
     return (
-        f'"{author_name}"[Author] '
+        f'"{author_name}" '
         f'AND ("{mindate}"[PDAT] : "{maxdate}"[PDAT])'
     )
 
@@ -291,9 +291,36 @@ def main():
     state = load_state("data/state.json")
     now = datetime.now(timezone.utc)
 
-    mindate, maxdate = ymd(iso_to_utc_dt(state["last_run_utc"])), ymd(now)
+    state = load_state("data/state.json")
+    now = datetime.now(timezone.utc)
 
-    seen = set(state["seen_pmids"])
+    # -------------------- DATE WINDOW LOGIC --------------------
+
+    settings_start = (settings.get("starting_date") or "").strip()
+    settings_end = (settings.get("ending_date") or "").strip()
+
+    if settings_start:
+        # ---- MANUAL OVERRIDE MODE ----
+        mindate = settings_start
+        maxdate = settings_end if settings_end else ymd(now)
+        update_state = False
+        seen = set()
+    else:
+        # ---- INCREMENTAL MODE ----
+        last_run = state.get("last_run_utc")
+        seen = set(state["seen_pmids"])
+        if last_run:
+            mindate = ymd(iso_to_utc_dt(last_run))
+        else:
+            # first-ever run fallback
+            mindate = ymd(now - timedelta(days=30))
+
+        maxdate = ymd(now)
+        update_state = True
+    
+    print(f"[DEBUG] Date window: {mindate} → {maxdate}")
+
+    
     all_rows = []
 
     dbg = open_debug_log()
@@ -301,6 +328,9 @@ def main():
     for a in authors:
         full_name = a["full_name"]
         search_name = build_search_name(full_name)
+
+        query = build_query(search_name, mindate, maxdate)
+        print(f"[DEBUG] Query for {full_name}: {query}")
 
         pmids = esearch_pmids(
             build_query(search_name, mindate, maxdate),
@@ -373,9 +403,11 @@ def main():
 
     write_meta_to_worksheet(sh)
 
-    state["last_run_utc"] = now.isoformat()
-    state["seen_pmids"] = sorted(seen)
-    save_state("data/state.json", state)
+    if update_state:
+        state["last_run_utc"] = now.isoformat()
+        state["seen_pmids"] = sorted(seen)
+        save_state("data/state.json", state)
+
 
     print("Run complete: Google Sheet updated.")
 

@@ -1,3 +1,11 @@
+# ---- Agent Time Settings ----
+# Leave empty for automatic quarterly/incremental mode
+# Set manually for ad-hoc backfill runs (YYYY-MM-DD)
+starting_date: "2025-01-01"
+
+# Optional hard stop (usually leave empty)
+ending_date: ""
+
 # Optional but recommended for NCBI rate limits:
 ncbi_tool: "pubmed-30-authors-bot"
 ncbi_email: "avprojects11@gmail.com"
