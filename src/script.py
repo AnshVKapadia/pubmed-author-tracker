@@ -69,11 +69,11 @@ def save_state(path: str, state: Dict[str, Any]) -> None:
 
 # -------------------- PUBMED SEARCH --------------------
 
-def build_search_name(full_name: str) -> str:
+def build_search_names(full_name: str) -> List[str]:
     """
-    Rachel Leon        -> Leon R
-    Rachel L Leon      -> Leon RL
-    Myra H Wyckoff     -> Wyckoff MH
+    Rachel Leon        -> ["Leon R"]
+    Rachel L Leon      -> ["Leon RL", "Leon R"]
+    Myra H Wyckoff     -> ["Wyckoff MH", "Wyckoff M"]
     """
     parts = full_name.strip().split()
     if len(parts) < 2:
@@ -83,12 +83,30 @@ def build_search_name(full_name: str) -> str:
     middle = parts[1:-1]
     last = parts[-1]
 
-    initials = first[0]
+    names = [full_name, f"{first} {last}"]
+
+    # If middle exists, include combined initials
     if middle:
-        initials += middle[0][0]
+        initials = first[0] + middle[0][0]
+        names.append(f"{last} {initials}")  # preferred first
 
-    return f"{last} {initials}"
+    # Always include first initial only
+    names.append(f"{last} {first[0]}")
 
+    # Deduplicate just in case
+    return list(dict.fromkeys(names))
+
+import unicodedata
+import re
+
+def normalize_name(s: str) -> str:
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = s.lower()
+    s = re.sub(r"[^a-z\s]", "", s)
+    return re.sub(r"\s+", " ", s).strip()
 
 def build_query(author_name: str, mindate: str, maxdate: str) -> str:
     return (
@@ -129,7 +147,7 @@ def _text(node: Optional[ET.Element]) -> str:
 
 def efetch_details(
     pmids: List[str],
-    full_name: str,
+    search_names: List[str],        # ← NEW
     affiliations: List[str],
     tool: Optional[str],
     email: Optional[str],
@@ -140,14 +158,11 @@ def efetch_details(
     if not pmids:
         return []
     
-    parts = full_name.lower().split()
-    tracked_last = parts[-1]
+    take_full_name = search_names[0]
 
-    # Build initials exactly like build_search_name()
-    tracked_initials = parts[0][0]
-    if len(parts) > 2:
-        tracked_initials += parts[1][0]
-
+    normalized_search_names = {
+        normalize_name(n) for n in search_names
+    }
 
     rows: List[Dict[str, Any]] = []
     url = f"{EUTILS_BASE}/efetch.fcgi"
@@ -175,7 +190,7 @@ def efetch_details(
 
             # ------------------ AFFILIATIONS ------------------
             affs = [
-                (aff.text or "").strip()
+                (aff.text or "").strip().replace(',','')
                 for aff in article.findall(".//Affiliation")
                 if aff.text
             ]
@@ -186,17 +201,6 @@ def efetch_details(
                 for aff in affs
             )
 
-            if not affiliation_match:
-                if affs:
-                    if dbg:
-                        log_write(dbg, f"[SKIP] PMID {pmid}: affiliation mismatch | tracked={full_name}")
-                        for aff in affiliations:
-                            log_write(dbg, f"   AFF: {aff}")
-                    continue
-                else:
-                    log_write(dbg, f"[INFO] PMID {pmid}: NO affiliations recorded | tracked={full_name}")
-
-
             # ------------------ AUTHOR NAME MATCHING ------------------
             author_elems = article.findall(".//Author")
 
@@ -204,27 +208,43 @@ def efetch_details(
             author_match = False
 
             for a in author_elems:
-                last = _text(a.find("LastName")).lower()
-                fore = _text(a.find("ForeName")).lower()
-                init = _text(a.find("Initials")).lower()
+                last = _text(a.find("LastName"))
+                fore = _text(a.find("ForeName"))
+                init = _text(a.find("Initials"))
 
-                if last:
-                    author_names.append(f"{last} {init}".strip())
+                together = f"{fore} {init} {last}"
+                last = together.split(' ')[-1] # Re-split and take last
+                author_names.append(f"{together}")
 
-                if last == tracked_last:
-                    if init.startswith(tracked_initials):
-                        author_match = True
-                    elif not init and fore.startswith(parts[0]):
-                        author_match = True
+                author_match = any((normalize_name(last) in name) for name in normalized_search_names if last != '')
+                
+                if author_match:
+                    break
 
-            if not author_match:
-                if dbg:
-                    log_write(
-                        dbg,
-                        f"[SKIP] PMID {pmid}: affiliation OK but AUTHOR mismatch | tracked={full_name}"
-                    )
-                    log_write(dbg, f"   Authors found: {author_names}")
-                continue
+            # ------------------ FILTERING LOGIC ------------------
+            if not affiliation_match:
+                if affs and author_match:
+                    if dbg:
+                        log_write(
+                            dbg,
+                            f"[SKIP] PMID {pmid}: affiliation mismatch → WRONG person | tracked={search_names[0]}"
+                        )
+                        for aff in affs:
+                            log_write(dbg, f"    - {aff}")
+                        log_write(dbg, f"   Authors found: {author_names}")
+                    continue
+                elif affs:
+                    if dbg:
+                        log_write(
+                            dbg,
+                            f"[INFO] PMID {pmid}: collaborator hit (non-author) | tracked={search_names[0]}"
+                        )
+                else:
+                    if dbg:
+                        log_write(
+                            dbg,
+                            f"[INFO] PMID {pmid}: no affiliations found | tracked={search_names[0]}"
+                        )
 
             # ------------------ METADATA ------------------
             doi = next(
@@ -327,23 +347,26 @@ def main():
 
     for a in authors:
         full_name = a["full_name"]
-        search_name = build_search_name(full_name)
+        search_names = build_search_names(full_name)
 
-        query = build_query(search_name, mindate, maxdate)
-        print(f"[DEBUG] Query for {full_name}: {query}")
+        pmids = set()
 
-        pmids = esearch_pmids(
-            build_query(search_name, mindate, maxdate),
-            settings.get("ncbi_tool"),
-            settings.get("ncbi_email"),
-            api_key=api_key,
-        )
+        for name in search_names:
+            query = build_query(name, mindate, maxdate)
+            print(f"[DEBUG]: Query: {query}")
+            result_pmids = esearch_pmids(
+                query,
+                settings.get("ncbi_tool"),
+                settings.get("ncbi_email"),
+                api_key=api_key,
+            )
+            pmids.update(result_pmids)
 
-        new_pmids = [p for p in pmids if p not in seen]
+        new_pmids = list(pmids)
 
         rows = efetch_details(
             new_pmids,
-            full_name,
+            search_names,
             a["affiliations"],
             settings.get("ncbi_tool"),
             settings.get("ncbi_email"),
