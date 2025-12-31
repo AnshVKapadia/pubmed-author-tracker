@@ -14,3 +14,6 @@ __pycache__/
 .venv/
 .env
 .DS_Store
+
+# author generating script
+authoryamlgen.py

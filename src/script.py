@@ -91,32 +91,49 @@ def save_state(path: str, state: Dict[str, Any]) -> None:
 
 # -------------------- PUBMED SEARCH --------------------
 
-def build_search_names(full_name: str) -> List[str]:
+def build_search_names_from_author(author_entry: Dict[str, Any]) -> List[str]:
     """
-    Rachel Leon        -> ["Leon R"]
-    Rachel L Leon      -> ["Leon RL", "Leon R"]
-    Myra H Wyckoff     -> ["Wyckoff MH", "Wyckoff M"]
+    Build PubMed search names from authors.yaml entry.
+    Uses explicit other_names + derived initials.
     """
-    parts = full_name.strip().split()
-    if len(parts) < 2:
-        raise ValueError(f"Invalid full_name: {full_name}")
 
-    first = parts[0]
-    middle = parts[1:-1]
-    last = parts[-1]
+    base_names = set()
 
-    names = [full_name, f"{first} {last}"]
+    # Always include full_name
+    if author_entry.get("full_name"):
+        base_names.add(author_entry["full_name"])
 
-    # If middle exists, include combined initials
-    if middle:
-        initials = first[0] + middle[0][0]
-        names.append(f"{last} {initials}")  # preferred first
+    # Include any manually specified variants
+    for n in author_entry.get("other_names", []):
+        if n:
+            base_names.add(n)
 
-    # Always include first initial only
-    names.append(f"{last} {first[0]}")
+    search_names = set()
 
-    # Deduplicate just in case
-    return list(dict.fromkeys(names))
+    for name in base_names:
+        parts = name.strip().split()
+        if len(parts) < 2:
+            continue
+
+        first = parts[0]
+        middle = parts[1:-1]
+        last = parts[-1]
+
+        # Full name as-is
+        search_names.add(name)
+
+        # First + Last
+        search_names.add(f"{first} {last}")
+
+        # Last + First initial
+        search_names.add(f"{last} {first[0]}")
+
+        # Last + First+Middle initials
+        if middle:
+            initials = first[0] + "".join(m[0] for m in middle)
+            search_names.add(f"{last} {initials}")
+
+    return sorted(search_names)
 
 import unicodedata
 import re
@@ -331,11 +348,11 @@ def efetch_details(
                     
                 forelast = ((fore + " " + last))
 
-                if normalize_name(forelast) in normalized_search_names:
+                if forelast in normalized_search_names:
                     author_match = True
                     wrong_author_flagged = False
                     break
-                elif any([normalize_name(last) in n for n in normalized_search_names]):
+                elif any([last in n for n in normalized_search_names]):
                     wrong_author_flagged = True
 
             collab_match = False
@@ -582,7 +599,12 @@ def main():
 
     for a in authors:
         full_name = a["full_name"]
-        search_names = build_search_names(full_name)
+        search_names = build_search_names_from_author(full_name)
+
+        log_section(dbg, f"AUTHOR IDENTITY: {a['full_name']}")
+        log_write(dbg, f"Search name variants:")
+        for n in search_names:
+            log_write(dbg, f"  - {n}")
 
         pmids = set()
 

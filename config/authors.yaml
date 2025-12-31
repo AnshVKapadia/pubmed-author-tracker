@@ -1,4 +1,7 @@
 - full_name: "Vishal Kapadia"
+  other_names: 
+    - "Vishal Kapadia"
+    - "Vishal S Kapadia"
   affiliations:
     - "UT Southwestern"
     - "UTSW"
@@ -6,6 +9,8 @@
     - "University of Texas Southwestern Medical Center"
 
 - full_name: "Myra H Wyckoff"
+  other_names: 
+    - "Myra Wyckoff"
   affiliations:
     - "UT Southwestern"
     - "UTSW"
