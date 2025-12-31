@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, TextIO
@@ -12,13 +13,28 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 import gspread
 from google.oauth2.service_account import Credentials
 
+import google.generativeai as genai
 from dotenv import load_dotenv
 load_dotenv()
+from threading import Lock
 
 EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 
 api_key = os.getenv("NCBI_API_KEY")
 google_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+GEMINI_MODEL = genai.GenerativeModel(
+    model_name="gemma-3-27b-it",
+    generation_config={
+        "temperature": 0,
+        "response_mime_type": "application/json",
+    },
+)
+
+GEMINI_MIN_INTERVAL = 7.5  # seconds → ~9 requests/min
+_last_gemini_ts = 0.0
+_gemini_lock = Lock()
 
 if not api_key:
     print("Warning: NCBI_API_KEY not set; PubMed requests will use lower rate limits.")
@@ -40,6 +56,12 @@ def open_debug_log() -> TextIO:
 
 def log_write(dbg: TextIO, msg: str) -> None:
     dbg.write(msg + "\n")
+
+def log_section(dbg: TextIO, title: str):
+    log_write(dbg, "=" * 60)
+    log_write(dbg, title)
+    log_write(dbg, "=" * 60)
+
 
 # -------------------- TIME HELPERS --------------------
 
@@ -108,11 +130,112 @@ def normalize_name(s: str) -> str:
     s = re.sub(r"[^a-z\s]", "", s)
     return re.sub(r"\s+", " ", s).strip()
 
+def first_n_words(text: str, n: int = 100) -> str:
+    words = text.split()
+    return " ".join(words[:n])
+
 def build_query(author_name: str, mindate: str, maxdate: str) -> str:
     return (
         f'"{author_name}" '
         f'AND ("{mindate}"[PDAT] : "{maxdate}"[PDAT])'
     )
+
+def build_author_profile(author_entry: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Convert authors.yaml entry into a compact JSON profile for the LLM.
+    """
+    return {
+        "full_name": author_entry.get("full_name"),
+        "affiliations": author_entry.get("affiliations", []),
+        "notes": author_entry.get("notes", ""),  # optional future field
+    }
+
+def build_paper_evidence(article: ET.Element) -> Dict[str, Any]:
+    def texts(path):
+        return [
+            (x.text or "").strip()
+            for x in article.findall(path)
+            if x.text
+        ]
+    
+    abstract_full = " ".join(texts(".//AbstractText"))
+
+    return {
+        "title": _text(article.find(".//ArticleTitle")),
+        "journal": _text(article.find(".//Journal/Title")),
+        "abstract": first_n_words(abstract_full, 100),
+        "authors": [
+            {
+                "last": _text(a.find("LastName")),
+                "fore": _text(a.find("ForeName")),
+                "initials": _text(a.find("Initials")),
+                "affiliations": texts(".//Affiliation"),
+            }
+            for a in article.findall(".//Author")
+        ],
+        "mesh_terms": texts(".//MeshHeading/DescriptorName"),
+        "keywords": texts(".//Keyword"),
+    }
+
+def gemini_validate_batch(
+    author_profile: Dict[str, Any],
+    papers: List[Dict[str, Any]],
+    dbg
+) -> Dict[str, Any]:
+    """
+    papers = [
+      {"pmid": str, "evidence": {...}},
+      ...
+    ]
+    """
+
+    wait_for_gemini_slot()
+
+    prompt = f"""
+    You are validating which papers belong to a specific researcher.
+
+    AUTHOR PROFILE:
+    {json.dumps(author_profile, indent=2)}
+
+    PAPERS:
+    {json.dumps(papers, indent=2)}
+
+    Instructions:
+    - Return YES only for papers that clearly belong to this person.
+    - Return NO if clearly different.
+    - Return UNCERTAIN if unsure.
+    - Affiliations matter more than names.
+    - Do NOT assume name uniqueness.
+
+    Respond strictly in JSON:
+    {{
+    "results": {{
+        "<PMID>": {{
+        "decision": "YES|NO|UNCERTAIN",
+        "confidence": 0.0-1.0,
+        "reason": "..."
+        }}
+    }}
+    }}
+    """
+
+    log_write(dbg, f"\n\n{prompt}\n\n")
+
+    response = GEMINI_MODEL.generate_content(prompt)
+
+    try:
+        return json.loads(response.text)
+    except Exception:
+        return {"results": {}}
+    
+def wait_for_gemini_slot():
+    global _last_gemini_ts
+    with _gemini_lock:
+        now = time.monotonic()
+        delta = now - _last_gemini_ts
+        if delta < GEMINI_MIN_INTERVAL:
+            time.sleep(GEMINI_MIN_INTERVAL - delta)
+        _last_gemini_ts = time.monotonic()
 
 @retry(
     reraise=True,
@@ -147,8 +270,8 @@ def _text(node: Optional[ET.Element]) -> str:
 
 def efetch_details(
     pmids: List[str],
-    search_names: List[str],        # ← NEW
-    affiliations: List[str],
+    author_entry: Dict[str, Any],   # ← ADD THIS
+    search_names: List[str],
     tool: Optional[str],
     email: Optional[str],
     api_key: Optional[str],
@@ -158,7 +281,7 @@ def efetch_details(
     if not pmids:
         return []
     
-    take_full_name = search_names[0]
+    affiliations = author_entry.get("affiliations", [])
 
     normalized_search_names = {
         normalize_name(n) for n in search_names
@@ -187,6 +310,60 @@ def efetch_details(
 
         for article in root.findall(".//PubmedArticle"):
             pmid = _text(article.find(".//PMID"))
+            
+            # ------------------ AUTHOR NAME MATCHING ------------------
+            author_elems = article.findall(".//Author")
+
+            author_names = []
+            author_match = False
+            wrong_author_flagged = False
+
+            for a in author_elems:
+                last = _text(a.find("LastName"))
+                fore = _text(a.find("ForeName"))
+                init = _text(a.find("Initials"))
+
+                together = f"{fore} {init} {last}"
+                if together.strip() == "": continue
+                fore = normalize_name(together.split(' ')[0]) # Re-split and take fore
+                last = normalize_name(together.split(' ')[-1]) # Re-split and take last
+                author_names.append(together)
+                    
+                forelast = ((fore + " " + last))
+
+                if normalize_name(forelast) in normalized_search_names:
+                    author_match = True
+                    wrong_author_flagged = False
+                    break
+                elif any([normalize_name(last) in n for n in normalized_search_names]):
+                    wrong_author_flagged = True
+
+            collab_match = False
+            wrong_collab_flagged = False
+            if not (author_match or wrong_author_flagged): #If author not found, check investigators
+                print(pmid)
+                investigators = article.findall(".//Investigator")
+                for a in investigators:
+                    last = _text(a.find("LastName"))
+                    fore = _text(a.find("ForeName"))
+                    init = _text(a.find("Initials"))
+
+                    together = f"{fore} {init} {last}"
+                    if together.strip() == "": continue
+                    fore = normalize_name(together.split(' ')[0]) # Re-split and take fore
+                    last = normalize_name(together.split(' ')[-1]) # Re-split and take last
+                        
+                    forelast = ((fore + " " + last))
+                    if pmid == "41364689" and last == "kapadia":
+                        print(forelast)
+                        print(normalized_search_names)
+
+                    if normalize_name(forelast) in normalized_search_names:
+                        collab_match = True
+                        wrong_collab_flagged = False
+                        break
+                    elif any([normalize_name(last) in n for n in normalized_search_names]):
+                        wrong_collab_flagged = True
 
             # ------------------ AFFILIATIONS ------------------
             affs = [
@@ -201,50 +378,91 @@ def efetch_details(
                 for aff in affs
             )
 
-            # ------------------ AUTHOR NAME MATCHING ------------------
-            author_elems = article.findall(".//Author")
+            # --------------- FILTERING LOGIC 2.0 -----------------
+            status = []
+            if dbg:
+                if wrong_author_flagged:
+                    status.append("AUTHOR MISMATCH")
+                    log_write(dbg, f"[INFO] PMID {pmid}: AUTHOR MISMATCH | tracked={search_names[0]}")
+                    log_write(dbg, f"   Authors found: {author_names}")
+                    continue
+                elif author_match:
+                    status.append("AUTHOR MATCH")
+                elif wrong_collab_flagged:
+                    status.append("COLLABORATOR MISMATCH")
+                    continue
+                elif collab_match:
+                    status.append("COLLABORATOR MATCH")
+                else:
+                    status.append("AUTHOR NOT FOUND")
+                    log_write(dbg, f"[INFO] PMID {pmid}: AUTHOR NOT FOUND | tracked={search_names[0]}")
 
-            author_names = []
-            author_match = False
-
-            for a in author_elems:
-                last = _text(a.find("LastName"))
-                fore = _text(a.find("ForeName"))
-                init = _text(a.find("Initials"))
-
-                together = f"{fore} {init} {last}"
-                last = together.split(' ')[-1] # Re-split and take last
-                author_names.append(f"{together}")
-
-                author_match = any((normalize_name(last) in name) for name in normalized_search_names if last != '')
+                if affiliation_match and affs:
+                    status.append("AFF MATCH")
+                elif affs:
+                    status.append("AFF MISMATCH")
+                    log_write(dbg, f"[INFO] PMID {pmid}: AFF MISMATCH | tracked={search_names[0]}")
+                    log_write(dbg, f"    - {affs[0:3]}")
+                else:
+                    status.append("AFF NOT FOUND")
+                    log_write(dbg, f"[INFO] PMID {pmid}: AFF NOT FOUND | tracked={search_names[0]}")
                 
-                if author_match:
-                    break
+            status = " + ".join(status)
 
             # ------------------ FILTERING LOGIC ------------------
-            if not affiliation_match:
-                if affs and author_match:
-                    if dbg:
-                        log_write(
-                            dbg,
-                            f"[SKIP] PMID {pmid}: affiliation mismatch → WRONG person | tracked={search_names[0]}"
-                        )
-                        for aff in affs:
-                            log_write(dbg, f"    - {aff}")
-                        log_write(dbg, f"   Authors found: {author_names}")
-                    continue
-                elif affs:
-                    if dbg:
-                        log_write(
-                            dbg,
-                            f"[INFO] PMID {pmid}: collaborator hit (non-author) | tracked={search_names[0]}"
-                        )
-                else:
-                    if dbg:
-                        log_write(
-                            dbg,
-                            f"[INFO] PMID {pmid}: no affiliations found | tracked={search_names[0]}"
-                        )
+            # status = "AFFILIATIONS VALID"
+            # log_write(dbg, "")
+            # if not affiliation_match:
+            #     if affs and author_match:
+            #         if dbg:
+            #             status = "AFFILIATIONS MISMATCH + AUTHOR MISMATCH"
+            #             log_write(
+            #                 dbg,
+            #                 f"[INFO] PMID {pmid}: affiliation mismatch → WRONG person | tracked={search_names[0]}"
+            #             )
+            #             # for aff in affs:
+            #             #     log_write(dbg, f"    - {aff}")
+            #             log_write(dbg, f"    - {affs[0]}")
+            #             log_write(dbg, f"   Authors found: {author_names}")
+            #         # continue
+            #     elif affs:
+            #         if dbg:
+            #             status = "AFFILIATIONS MISMATCH + COLLABORATOR LIKELY"
+            #             log_write(
+            #                 dbg,
+            #                 f"[INFO] PMID {pmid}: collaborator hit (non-author) | tracked={search_names[0]}"
+            #             )
+            #     else:
+            #         status = "AFFILIATIONS NOT FOUND"
+            #         if dbg:
+            #             log_write(
+            #                 dbg,
+            #                 f"[INFO] PMID {pmid}: no affiliations found | tracked={search_names[0]}"
+            #             )
+            #             log_write(dbg, f"   Authors found: {author_names}")
+            #             log_write(dbg, f"Do the authors match? {author_match}")
+
+            # ------------- LLM QUERY BUILDING -------------
+            # llm_candidates = []
+
+            # use_llm = (
+            #     (status == "AFFILIATIONS NOT FOUND" and author_match)
+            #     or
+            #     (status == "AFFILIATIONS MISMATCH + COLLABORATOR LIKELY")
+            # )
+
+            # use_llm = False
+
+            # if use_llm:
+            #     log_write(dbg, f"[LLM-CANDIDATE] PMID {pmid}")
+            #     log_write(dbg, f"  Status: {status}")
+            #     log_write(dbg, f"  Reason: deterministic filters inconclusive")
+
+            #     llm_candidates.append({
+            #         "pmid": pmid,
+            #         "evidence": build_paper_evidence(article),
+            #     })
+
 
             # ------------------ METADATA ------------------
             doi = next(
@@ -264,7 +482,24 @@ def efetch_details(
                 "doi": doi,
                 "authors": "; ".join(author_names),
                 "pubmed_url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
+                "status": status,
             })
+
+    # if llm_candidates:
+    #     log_section(dbg, f"LLM VALIDATION for {author_entry['full_name']}")
+
+    #     author_profile = build_author_profile(author_entry)
+    #     llm_response = gemini_validate_batch(author_profile, llm_candidates, dbg)
+
+    #     for r in rows:
+    #         pmid = r["pmid"]
+    #         decision = llm_response.get("results", {}).get(pmid)
+
+    #         if decision:
+    #             r["status"] = f"LLM_{decision['decision']}"
+    #             log_write(dbg, f"PMID {pmid}: {r['status']}")
+    #             log_write(dbg, f"  Confidence: {decision['confidence']}")
+    #             log_write(dbg, f"  Reason: {decision['reason']}")
 
     return rows
 
@@ -353,7 +588,7 @@ def main():
 
         for name in search_names:
             query = build_query(name, mindate, maxdate)
-            print(f"[DEBUG]: Query: {query}")
+            #print(f"[DEBUG]: Query: {query}")
             result_pmids = esearch_pmids(
                 query,
                 settings.get("ncbi_tool"),
@@ -366,8 +601,8 @@ def main():
 
         rows = efetch_details(
             new_pmids,
+            a,                    # ← PASS FULL YAML ENTRY
             search_names,
-            a["affiliations"],
             settings.get("ncbi_tool"),
             settings.get("ncbi_email"),
             api_key=api_key,
@@ -392,6 +627,7 @@ def main():
         "authors",
         "pubmed_url",
         "tracked_author",
+        "status",
     ]
 
     df = pd.DataFrame(all_rows, columns=EXPECTED_COLS)
