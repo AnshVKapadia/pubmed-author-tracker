@@ -91,49 +91,31 @@ def save_state(path: str, state: Dict[str, Any]) -> None:
 
 # -------------------- PUBMED SEARCH --------------------
 
-def build_search_names_from_author(author_entry: Dict[str, Any]) -> List[str]:
+def get_author_search_names(author_entry: Dict[str, Any]) -> List[str]:
     """
-    Build PubMed search names from authors.yaml entry.
-    Uses explicit other_names + derived initials.
+    Use ONLY explicitly declared name variants from authors.yaml.
+    No auto-generation.
     """
 
-    base_names = set()
+    names = []
 
-    # Always include full_name
     if author_entry.get("full_name"):
-        base_names.add(author_entry["full_name"])
+        names.append(author_entry["full_name"])
 
-    # Include any manually specified variants
     for n in author_entry.get("other_names", []):
         if n:
-            base_names.add(n)
+            names.append(n)
 
-    search_names = set()
+    # Normalize whitespace + dedupe while preserving order
+    seen = set()
+    final = []
+    for n in names:
+        key = normalize_name(n)
+        if key not in seen:
+            seen.add(key)
+            final.append(n.strip())
 
-    for name in base_names:
-        parts = name.strip().split()
-        if len(parts) < 2:
-            continue
-
-        first = parts[0]
-        middle = parts[1:-1]
-        last = parts[-1]
-
-        # Full name as-is
-        search_names.add(name)
-
-        # First + Last
-        search_names.add(f"{first} {last}")
-
-        # Last + First initial
-        search_names.add(f"{last} {first[0]}")
-
-        # Last + First+Middle initials
-        if middle:
-            initials = first[0] + "".join(m[0] for m in middle)
-            search_names.add(f"{last} {initials}")
-
-    return sorted(search_names)
+    return final
 
 import unicodedata
 import re
@@ -358,12 +340,11 @@ def efetch_details(
             collab_match = False
             wrong_collab_flagged = False
             if not (author_match or wrong_author_flagged): #If author not found, check investigators
-                print(pmid)
                 investigators = article.findall(".//Investigator")
                 for a in investigators:
                     last = _text(a.find("LastName"))
                     fore = _text(a.find("ForeName"))
-                    init = _text(a.find("Initials"))
+                    init = _text(a.find("Initials"))        
 
                     together = f"{fore} {init} {last}"
                     if together.strip() == "": continue
@@ -371,9 +352,6 @@ def efetch_details(
                     last = normalize_name(together.split(' ')[-1]) # Re-split and take last
                         
                     forelast = ((fore + " " + last))
-                    if pmid == "41364689" and last == "kapadia":
-                        print(forelast)
-                        print(normalized_search_names)
 
                     if normalize_name(forelast) in normalized_search_names:
                         collab_match = True
@@ -557,7 +535,7 @@ def write_meta_to_worksheet(sh):
 # -------------------- MAIN --------------------
 
 def main():
-    authors = load_yaml("config/authors.yaml")
+    authors = load_yaml("config/authors.yaml") 
     settings = load_yaml("config/settings.yaml")
 
     state = load_state("data/state.json")
@@ -599,7 +577,7 @@ def main():
 
     for a in authors:
         full_name = a["full_name"]
-        search_names = build_search_names_from_author(full_name)
+        search_names = get_author_search_names(a)
 
         log_section(dbg, f"AUTHOR IDENTITY: {a['full_name']}")
         log_write(dbg, f"Search name variants:")
@@ -610,7 +588,7 @@ def main():
 
         for name in search_names:
             query = build_query(name, mindate, maxdate)
-            #print(f"[DEBUG]: Query: {query}")
+            print(f"[DEBUG]: Query: {query}")
             result_pmids = esearch_pmids(
                 query,
                 settings.get("ncbi_tool"),
