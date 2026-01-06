@@ -1,46 +1,68 @@
-- full_name: "Vishal Kapadia"
+- full_name: "Myra H Wyckoff" 
   other_names: 
-    - "Vishal Kapadia"
-    - "Vishal S Kapadia"
-  affiliations:
-    - "UT Southwestern"
-    - "UTSW"
-    - "University of Texas Southwestern"
-    - "University of Texas Southwestern Medical Center"
+    - "Myra H Wyckoff" 
+    - "Wyckoff MH" 
+    - "Myra Wyckoff" 
+    - "Wyckoff M" 
+  affiliations: 
+    - "UT Southwestern" 
+    - "UTSW" 
+    - "University of Texas Southwestern" 
+    - "University of Texas Southwestern Medical Center" 
 
-- full_name: "Myra H Wyckoff"
+- full_name: "Eric B Ortigoza" 
   other_names: 
-    - "Myra Wyckoff"
-  affiliations:
-    - "UT Southwestern"
-    - "UTSW"
-    - "University of Texas Southwestern"
-    - "University of Texas Southwestern Medical Center"
+    - "Eric B Ortigoza" 
+    - "Ortigoza EB" 
+    - "Eric Ortigoza" 
+    - "Ortigoza E" 
+  affiliations: 
+    - "UT Southwestern" 
+    - "UTSW" 
+    - "University of Texas Southwestern" 
+    - "University of Texas Southwestern Medical Center" 
 
-- full_name: "Eric B Ortigoza"
-  affiliations:
-    - "UT Southwestern"
-    - "UTSW"
-    - "University of Texas Southwestern"
-    - "University of Texas Southwestern Medical Center"
+- full_name: "Vishal S Kapadia" 
+  other_names: 
+    - "Vishal S Kapadia" 
+    - "Kapadia VS" 
+    - "Vishal Kapadia" 
+    - "Kapadia V" 
+  affiliations: 
+    - "UT Southwestern" 
+    - "UTSW" 
+    - "University of Texas Southwestern" 
+    - "University of Texas Southwestern Medical Center" 
 
-- full_name: "Rachel L Leon"
-  affiliations:
-    - "UT Southwestern"
-    - "UTSW"
-    - "University of Texas Southwestern"
-    - "University of Texas Southwestern Medical Center"
+- full_name: "Rachel L Leon" 
+  other_names: 
+    - "Rachel L Leon" 
+    - "Leon RL" 
+    - "Rachel Leon" 
+    - "Leon R" 
+  affiliations: 
+    - "UT Southwestern" 
+    - "UTSW" 
+    - "University of Texas Southwestern" 
+    - "University of Texas Southwestern Medical Center" 
 
-- full_name: "Venkatakrishna Kakkilaya"
-  affiliations:
-    - "UT Southwestern"
-    - "UTSW"
-    - "University of Texas Southwestern"
-    - "University of Texas Southwestern Medical Center"
+- full_name: "Venkatakrishna Kakkilaya" 
+  other_names: 
+    - "Venkatakrishna Kakkilaya" 
+    - "Kakkilaya V" 
+    - "Venkat Kakkilaya"
+  affiliations: 
+    - "UT Southwestern" 
+    - "UTSW" 
+    - "University of Texas Southwestern" 
+    - "University of Texas Southwestern Medical Center" 
 
-- full_name: "Abhishek Makkar"
-  affiliations:
-    - "UT Southwestern"
-    - "UTSW"
-    - "University of Texas Southwestern"
-    - "University of Texas Southwestern Medical Center"
+- full_name: "Abhishek Makkar" 
+  other_names: 
+    - "Abhishek Makkar" 
+    - "Makkar A" 
+  affiliations: 
+    - "UT Southwestern" 
+    - "UTSW" 
+    - "University of Texas Southwestern" 
+    - "University of Texas Southwestern Medical Center" 

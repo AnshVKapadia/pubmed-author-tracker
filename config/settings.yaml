@@ -1,7 +1,7 @@
 # ---- Agent Time Settings ----
 # Leave empty for automatic quarterly/incremental mode
 # Set manually for ad-hoc backfill runs (YYYY-MM-DD)
-starting_date: "2025-10-01"
+starting_date: "2025-11-01"
 
 # Optional hard stop (usually leave empty)
 ending_date: ""
