@@ -13,7 +13,6 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 import gspread
 from google.oauth2.service_account import Credentials
 
-import google.generativeai as genai
 from dotenv import load_dotenv
 load_dotenv()
 from threading import Lock
@@ -22,19 +21,6 @@ EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 
 api_key = os.getenv("NCBI_API_KEY")
 google_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-
-GEMINI_MODEL = genai.GenerativeModel(
-    model_name="gemma-3-27b-it",
-    generation_config={
-        "temperature": 0,
-        "response_mime_type": "application/json",
-    },
-)
-
-GEMINI_MIN_INTERVAL = 7.5  # seconds → ~9 requests/min
-_last_gemini_ts = 0.0
-_gemini_lock = Lock()
 
 if not api_key:
     print("Warning: NCBI_API_KEY not set; PubMed requests will use lower rate limits.")
@@ -45,7 +31,6 @@ if not google_json:
     )
 
 # ----------------- LOGGING HELPERS --------------------
-
 def ensure_logs_dir() -> None:
     Path("logs").mkdir(parents=True, exist_ok=True)
 
@@ -62,9 +47,19 @@ def log_section(dbg: TextIO, title: str):
     log_write(dbg, title)
     log_write(dbg, "=" * 60)
 
+# -------------------- SHEETS SAFETY --------------------
+SHEETS_MIN_INTERVAL = 1.2  # seconds (~50 writes/min)
+_last_sheets_write = 0.0
+
+def sheets_guard():
+    global _last_sheets_write
+    now = time.monotonic()
+    delta = now - _last_sheets_write
+    if delta < SHEETS_MIN_INTERVAL:
+        time.sleep(SHEETS_MIN_INTERVAL - delta)
+    _last_sheets_write = time.monotonic()
 
 # -------------------- TIME HELPERS --------------------
-
 def iso_to_utc_dt(iso_str: str) -> datetime:
     return datetime.fromisoformat(iso_str).astimezone(timezone.utc)
 
@@ -72,7 +67,6 @@ def ymd(dt_utc: datetime) -> str:
     return dt_utc.strftime("%Y/%m/%d")
 
 # -------------------- FILE LOADERS --------------------
-
 def load_yaml(path: str) -> Any:
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
@@ -90,7 +84,6 @@ def save_state(path: str, state: Dict[str, Any]) -> None:
         json.dump(state, f, indent=2, sort_keys=True)
 
 # -------------------- PUBMED SEARCH --------------------
-
 def get_author_search_names(author_entry: Dict[str, Any]) -> List[str]:
     """
     Use ONLY explicitly declared name variants from authors.yaml.
@@ -129,112 +122,11 @@ def normalize_name(s: str) -> str:
     s = re.sub(r"[^a-z\s]", "", s)
     return re.sub(r"\s+", " ", s).strip()
 
-def first_n_words(text: str, n: int = 100) -> str:
-    words = text.split()
-    return " ".join(words[:n])
-
 def build_query(author_name: str, mindate: str, maxdate: str) -> str:
     return (
         f'"{author_name}" '
         f'AND ("{mindate}"[PDAT] : "{maxdate}"[PDAT])'
     )
-
-def build_author_profile(author_entry: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Convert authors.yaml entry into a compact JSON profile for the LLM.
-    """
-    return {
-        "full_name": author_entry.get("full_name"),
-        "affiliations": author_entry.get("affiliations", []),
-        "notes": author_entry.get("notes", ""),  # optional future field
-    }
-
-def build_paper_evidence(article: ET.Element) -> Dict[str, Any]:
-    def texts(path):
-        return [
-            (x.text or "").strip()
-            for x in article.findall(path)
-            if x.text
-        ]
-    
-    abstract_full = " ".join(texts(".//AbstractText"))
-
-    return {
-        "title": _text(article.find(".//ArticleTitle")),
-        "journal": _text(article.find(".//Journal/Title")),
-        "abstract": first_n_words(abstract_full, 100),
-        "authors": [
-            {
-                "last": _text(a.find("LastName")),
-                "fore": _text(a.find("ForeName")),
-                "initials": _text(a.find("Initials")),
-                "affiliations": texts(".//Affiliation"),
-            }
-            for a in article.findall(".//Author")
-        ],
-        "mesh_terms": texts(".//MeshHeading/DescriptorName"),
-        "keywords": texts(".//Keyword"),
-    }
-
-def gemini_validate_batch(
-    author_profile: Dict[str, Any],
-    papers: List[Dict[str, Any]],
-    dbg
-) -> Dict[str, Any]:
-    """
-    papers = [
-      {"pmid": str, "evidence": {...}},
-      ...
-    ]
-    """
-
-    wait_for_gemini_slot()
-
-    prompt = f"""
-    You are validating which papers belong to a specific researcher.
-
-    AUTHOR PROFILE:
-    {json.dumps(author_profile, indent=2)}
-
-    PAPERS:
-    {json.dumps(papers, indent=2)}
-
-    Instructions:
-    - Return YES only for papers that clearly belong to this person.
-    - Return NO if clearly different.
-    - Return UNCERTAIN if unsure.
-    - Affiliations matter more than names.
-    - Do NOT assume name uniqueness.
-
-    Respond strictly in JSON:
-    {{
-    "results": {{
-        "<PMID>": {{
-        "decision": "YES|NO|UNCERTAIN",
-        "confidence": 0.0-1.0,
-        "reason": "..."
-        }}
-    }}
-    }}
-    """
-
-    log_write(dbg, f"\n\n{prompt}\n\n")
-
-    response = GEMINI_MODEL.generate_content(prompt)
-
-    try:
-        return json.loads(response.text)
-    except Exception:
-        return {"results": {}}
-    
-def wait_for_gemini_slot():
-    global _last_gemini_ts
-    with _gemini_lock:
-        now = time.monotonic()
-        delta = now - _last_gemini_ts
-        if delta < GEMINI_MIN_INTERVAL:
-            time.sleep(GEMINI_MIN_INTERVAL - delta)
-        _last_gemini_ts = time.monotonic()
 
 @retry(
     reraise=True,
@@ -266,7 +158,6 @@ def _text(node: Optional[ET.Element]) -> str:
     return node.text.strip() if node is not None and node.text else ""
 
 # -------------------- EFETCH + FILTER --------------------
-
 def efetch_details(
     pmids: List[str],
     author_entry: Dict[str, Any],   # ← ADD THIS
@@ -309,56 +200,6 @@ def efetch_details(
 
         for article in root.findall(".//PubmedArticle"):
             pmid = _text(article.find(".//PMID"))
-            
-            # ------------------ AUTHOR NAME MATCHING ------------------
-            author_elems = article.findall(".//Author")
-
-            author_names = []
-            author_match = False
-            wrong_author_flagged = False
-
-            for a in author_elems:
-                last = _text(a.find("LastName"))
-                fore = _text(a.find("ForeName"))
-                init = _text(a.find("Initials"))
-
-                together = f"{fore} {init} {last}"
-                if together.strip() == "": continue
-                fore = normalize_name(together.split(' ')[0]) # Re-split and take fore
-                last = normalize_name(together.split(' ')[-1]) # Re-split and take last
-                author_names.append(together)
-                    
-                forelast = ((fore + " " + last))
-
-                if forelast in normalized_search_names:
-                    author_match = True
-                    wrong_author_flagged = False
-                    break
-                elif any([last in n for n in normalized_search_names]):
-                    wrong_author_flagged = True
-
-            collab_match = False
-            wrong_collab_flagged = False
-            if not (author_match or wrong_author_flagged): #If author not found, check investigators
-                investigators = article.findall(".//Investigator")
-                for a in investigators:
-                    last = _text(a.find("LastName"))
-                    fore = _text(a.find("ForeName"))
-                    init = _text(a.find("Initials"))        
-
-                    together = f"{fore} {init} {last}"
-                    if together.strip() == "": continue
-                    fore = normalize_name(together.split(' ')[0]) # Re-split and take fore
-                    last = normalize_name(together.split(' ')[-1]) # Re-split and take last
-                        
-                    forelast = ((fore + " " + last))
-
-                    if normalize_name(forelast) in normalized_search_names:
-                        collab_match = True
-                        wrong_collab_flagged = False
-                        break
-                    elif any([normalize_name(last) in n for n in normalized_search_names]):
-                        wrong_collab_flagged = True
 
             # ------------------ AFFILIATIONS ------------------
             affs = [
@@ -373,6 +214,66 @@ def efetch_details(
                 for aff in affs
             )
 
+            # ------------------ AUTHOR NAME MATCHING ------------------
+            author_elems = article.findall(".//Author")
+
+            author_names = []
+            author_match = False
+            wrong_author_flagged = False
+
+            for a in author_elems:
+                last = normalize_name(_text(a.find("LastName")))
+                fore = normalize_name(_text(a.find("ForeName")))
+                init = normalize_name(_text(a.find("Initials")))    
+
+                together = f"{fore} {last}"
+                if together.strip() == "": continue
+                author_names.append(together)
+                    
+                if len(fore) < 2:
+                    forelast = f"{last} {fore}"
+                elif len(init) > 1:
+                    forelast = f"{fore.split(' ')[0]} {" ".join(init[1:])} {last}"
+                else:
+                    forelast = f"{fore} {last}"
+
+                if forelast in normalized_search_names:
+                    #print(f"{forelast} in the list of authors matched with {normalized_search_names}")
+                    author_match = True
+                    wrong_author_flagged = False
+                    break
+                elif any([last in n for n in normalized_search_names]) and len(last) > 1:
+                    wrong_author_flagged = True
+                    #print(f"{forelast} wrong flagged the list of authors matched with {normalized_search_names}, last is {last} pmid is {pmid}")
+
+            collab_match = False
+            wrong_collab_flagged = False
+            if not (author_match or wrong_author_flagged): #If author not found, check investigators
+                investigators = article.findall(".//Investigator")
+                for a in investigators:
+                    last = normalize_name(_text(a.find("LastName")))
+                    fore = normalize_name(_text(a.find("ForeName")))
+                    init = normalize_name(_text(a.find("Initials")))        
+
+                    together = f"{fore} {last}"
+                    if together.strip() == "": continue
+                    # fore = normalize_name(together.split(' ')[0]) # Re-split and take fore
+                    # last = normalize_name(together.split(' ')[-1]) # Re-split and take last
+                        
+                    if len(fore) < 2:
+                        forelast = f"{last} {fore}"
+                    else:
+                        forelast = f"{fore} {last}"
+
+                    if normalize_name(forelast) in normalized_search_names:
+                        #print(f"{forelast} in the list of collabs matched with {normalized_search_names}")
+                        collab_match = True
+                        wrong_collab_flagged = False
+                        break
+                    elif any([normalize_name(last) in n for n in normalized_search_names]) and len(last) > 1:
+                        wrong_collab_flagged = True
+                        #print(f"{forelast} wrong flagged the list of collabs matched with {normalized_search_names} pmid is {pmid}")
+
             # --------------- FILTERING LOGIC 2.0 -----------------
             status = []
             if dbg:
@@ -381,16 +282,17 @@ def efetch_details(
                     log_write(dbg, f"[INFO] PMID {pmid}: AUTHOR MISMATCH | tracked={search_names[0]}")
                     log_write(dbg, f"   Authors found: {author_names}")
                     continue
-                elif author_match:
-                    status.append("AUTHOR MATCH")
                 elif wrong_collab_flagged:
                     status.append("COLLABORATOR MISMATCH")
                     continue
+                elif author_match:
+                    status.append("AUTHOR MATCH")
                 elif collab_match:
                     status.append("COLLABORATOR MATCH")
                 else:
-                    status.append("AUTHOR NOT FOUND")
-                    log_write(dbg, f"[INFO] PMID {pmid}: AUTHOR NOT FOUND | tracked={search_names[0]}")
+                    status.append("NOT FOUND")
+                    log_write(dbg, f"[INFO] PMID {pmid}: PERSON NOT FOUND | tracked={search_names[0]}")
+                    continue
 
                 if affiliation_match and affs:
                     status.append("AFF MATCH")
@@ -398,66 +300,12 @@ def efetch_details(
                     status.append("AFF MISMATCH")
                     log_write(dbg, f"[INFO] PMID {pmid}: AFF MISMATCH | tracked={search_names[0]}")
                     log_write(dbg, f"    - {affs[0:3]}")
+                    if author_match: continue
                 else:
                     status.append("AFF NOT FOUND")
                     log_write(dbg, f"[INFO] PMID {pmid}: AFF NOT FOUND | tracked={search_names[0]}")
                 
             status = " + ".join(status)
-
-            # ------------------ FILTERING LOGIC ------------------
-            # status = "AFFILIATIONS VALID"
-            # log_write(dbg, "")
-            # if not affiliation_match:
-            #     if affs and author_match:
-            #         if dbg:
-            #             status = "AFFILIATIONS MISMATCH + AUTHOR MISMATCH"
-            #             log_write(
-            #                 dbg,
-            #                 f"[INFO] PMID {pmid}: affiliation mismatch → WRONG person | tracked={search_names[0]}"
-            #             )
-            #             # for aff in affs:
-            #             #     log_write(dbg, f"    - {aff}")
-            #             log_write(dbg, f"    - {affs[0]}")
-            #             log_write(dbg, f"   Authors found: {author_names}")
-            #         # continue
-            #     elif affs:
-            #         if dbg:
-            #             status = "AFFILIATIONS MISMATCH + COLLABORATOR LIKELY"
-            #             log_write(
-            #                 dbg,
-            #                 f"[INFO] PMID {pmid}: collaborator hit (non-author) | tracked={search_names[0]}"
-            #             )
-            #     else:
-            #         status = "AFFILIATIONS NOT FOUND"
-            #         if dbg:
-            #             log_write(
-            #                 dbg,
-            #                 f"[INFO] PMID {pmid}: no affiliations found | tracked={search_names[0]}"
-            #             )
-            #             log_write(dbg, f"   Authors found: {author_names}")
-            #             log_write(dbg, f"Do the authors match? {author_match}")
-
-            # ------------- LLM QUERY BUILDING -------------
-            # llm_candidates = []
-
-            # use_llm = (
-            #     (status == "AFFILIATIONS NOT FOUND" and author_match)
-            #     or
-            #     (status == "AFFILIATIONS MISMATCH + COLLABORATOR LIKELY")
-            # )
-
-            # use_llm = False
-
-            # if use_llm:
-            #     log_write(dbg, f"[LLM-CANDIDATE] PMID {pmid}")
-            #     log_write(dbg, f"  Status: {status}")
-            #     log_write(dbg, f"  Reason: deterministic filters inconclusive")
-
-            #     llm_candidates.append({
-            #         "pmid": pmid,
-            #         "evidence": build_paper_evidence(article),
-            #     })
-
 
             # ------------------ METADATA ------------------
             doi = next(
@@ -480,22 +328,6 @@ def efetch_details(
                 "status": status,
             })
 
-    # if llm_candidates:
-    #     log_section(dbg, f"LLM VALIDATION for {author_entry['full_name']}")
-
-    #     author_profile = build_author_profile(author_entry)
-    #     llm_response = gemini_validate_batch(author_profile, llm_candidates, dbg)
-
-    #     for r in rows:
-    #         pmid = r["pmid"]
-    #         decision = llm_response.get("results", {}).get(pmid)
-
-    #         if decision:
-    #             r["status"] = f"LLM_{decision['decision']}"
-    #             log_write(dbg, f"PMID {pmid}: {r['status']}")
-    #             log_write(dbg, f"  Confidence: {decision['confidence']}")
-    #             log_write(dbg, f"  Reason: {decision['reason']}")
-
     return rows
 
 # -------------------- GOOGLE SHEETS --------------------
@@ -510,17 +342,34 @@ def connect_gsheets() -> gspread.Client:
     )
     return gspread.authorize(creds)
 
+def safe_update(ws, values, range_name=None):
+    sheets_guard()
+    if range_name:
+        ws.update(range_name=range_name, values=values)
+    else:
+        ws.update(values)
+
+def safe_clear(ws):
+    sheets_guard()
+    ws.clear()
+
+def safe_add_worksheet(sh, title, rows=1, cols=1):
+    sheets_guard()
+    return sh.add_worksheet(title=title, rows=rows, cols=cols)
+
 def write_df_to_worksheet(sh, title: str, df: pd.DataFrame):
     try:
         ws = sh.worksheet(title)
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=title, rows=1, cols=1)
+        ws = safe_add_worksheet(sh, title=title, rows=1, cols=1)
 
-    ws.clear()
-    ws.update([df.columns.tolist()] + df.fillna("").values.tolist())
+    safe_clear(ws)
+    safe_update(ws, [df.columns.tolist()] + df.fillna("").values.tolist())
 
     if len(df) > 0:
+        sheets_guard()
         ws.freeze(rows=1)
+        sheets_guard()
         ws.set_basic_filter()
 
 def write_meta_to_worksheet(sh):
@@ -528,14 +377,15 @@ def write_meta_to_worksheet(sh):
     try:
         ws = sh.worksheet("Meta")
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title="Meta", rows=10, cols=5)
+        ws = safe_add_worksheet(sh, title="Meta", rows=10, cols=5)
+
+    safe_update(ws, [["last_updated_utc", ts]], range_name="A1:B1")
 
     ws.update(range_name="A1:B1", values=[["last_updated_utc", ts]])
 
 # -------------------- MAIN --------------------
-
 def main():
-    authors = load_yaml("config/authors.yaml") 
+    authors = load_yaml("config/authors2.yaml") 
     settings = load_yaml("config/settings.yaml")
 
     state = load_state("data/state.json")
@@ -545,7 +395,6 @@ def main():
     now = datetime.now(timezone.utc)
 
     # -------------------- DATE WINDOW LOGIC --------------------
-
     settings_start = (settings.get("starting_date") or "").strip()
     settings_end = (settings.get("ending_date") or "").strip()
 
@@ -569,8 +418,6 @@ def main():
         update_state = True
     
     print(f"[DEBUG] Date window: {mindate} → {maxdate}")
-
-    
     all_rows = []
 
     dbg = open_debug_log()
@@ -630,7 +477,11 @@ def main():
         "status",
     ]
 
+    LOW_CONF_KEYWORDS = ("AFF NOT FOUND", "AFF MISMATCH")
+
     df = pd.DataFrame(all_rows, columns=EXPECTED_COLS)
+    low_conf_df = df[df["status"].str.contains("|".join(LOW_CONF_KEYWORDS), na=False)]
+    master_df = df[~df.index.isin(low_conf_df.index)]
 
     os.makedirs("out", exist_ok=True)
     df.to_csv("out/master.csv", index=False)
@@ -638,27 +489,28 @@ def main():
     gc = connect_gsheets()
     sh = gc.open_by_key(os.getenv("SPREADSHEET_ID"))
 
-    write_df_to_worksheet(sh, "Master", df)
+    write_df_to_worksheet(sh, "Low Confidence Articles", low_conf_df)
+    write_df_to_worksheet(sh, "Master", master_df)
 
     for a in authors:
         name = a["full_name"]
-        sub = df[df["tracked_author"] == name]
+        sub = master_df[master_df["tracked_author"] == name]
+
+        if sub.empty:
+            continue  # NO writes for empty authors
 
         try:
             ws = sh.worksheet(name)
-            ws.clear()
         except gspread.WorksheetNotFound:
-            ws = sh.add_worksheet(title=name, rows=5, cols=5)
+            ws = safe_add_worksheet(sh, title=name, rows=1, cols=1)
 
-        if not sub.empty:
-            ws.update([sub.columns.tolist()] + sub.fillna("").values.tolist())
-            ws.freeze(rows=1)
-            ws.set_basic_filter()
-        else:
-            ws.update(
-                range_name="A1",
-                values=[["No publications found in this date window."]]
-            )
+        safe_clear(ws)
+        safe_update(ws, [sub.columns.tolist()] + sub.fillna("").values.tolist())
+
+        sheets_guard()
+        ws.freeze(rows=1)
+        sheets_guard()
+        ws.set_basic_filter()
 
     write_meta_to_worksheet(sh)
 
