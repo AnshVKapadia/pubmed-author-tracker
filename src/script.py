@@ -608,9 +608,9 @@ def main():
         last_run_utc = (settings.get("last_run_utc") or "").strip()
         if last_run_utc:
             last_run_dt = iso_to_utc_dt(last_run_utc)
-            mindate = ymd(last_run_dt)
+            mindate = ymd(last_run_dt - timedelta(days=91))
         else:
-            mindate = ymd(now - timedelta(days=30))
+            mindate = ymd(now - timedelta(days=91))
 
         maxdate = ymd(now)
         update_last_run = True
