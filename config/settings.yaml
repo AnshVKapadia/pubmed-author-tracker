@@ -9,7 +9,6 @@ ending_date: ""
 # Optional but recommended for NCBI rate limits:
 ncbi_tool: "pubmed-30-authors-bot"
 ncbi_email: "avprojects11@gmail.com"
-ncbi_api_key: 
 
 # Not used currently
 # timezone: "America/Chicago"

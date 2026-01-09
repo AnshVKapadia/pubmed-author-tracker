@@ -97,7 +97,6 @@ def gemini_extract_themes(papers: list[dict]) -> dict:
     parsed = ThemesOut.model_validate_json(resp.text)
     return parsed.model_dump()
 
-
 # ----------------- LOGGING HELPERS --------------------
 def ensure_logs_dir() -> None:
     Path("logs").mkdir(parents=True, exist_ok=True)
@@ -134,22 +133,23 @@ def iso_to_utc_dt(iso_str: str) -> datetime:
 def ymd(dt_utc: datetime) -> str:
     return dt_utc.strftime("%Y/%m/%d")
 
-# -------------------- FILE LOADERS --------------------
-def load_yaml(path: str) -> Any:
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+def parse_date_to_ymd(s: str, default_dt: datetime) -> str:
+    """
+    Accepts 'YYYY-MM-DD' or 'YYYY/MM/DD' or blank.
+    Returns PubMed-friendly 'YYYY/MM/DD'.
+    """
+    s = (s or "").strip()
+    if not s:
+        return ymd(default_dt)
 
-def load_state(path: str) -> Dict[str, Any]:
-    if not os.path.exists(path):
-        default_last = (datetime.now(timezone.utc) - timedelta(days=30)).replace(microsecond=0)
-        return {"last_run_utc": default_last.isoformat(), "seen_pmids": []}
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    if "-" in s:
+        dt = datetime.strptime(s, "%Y-%m-%d")
+    elif "/" in s:
+        dt = datetime.strptime(s, "%Y/%m/%d")
+    else:
+        raise ValueError(f"Unrecognized date format: {s}")
 
-def save_state(path: str, state: Dict[str, Any]) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2, sort_keys=True)
+    return dt.strftime("%Y/%m/%d")
 
 # -------------------- PUBMED SEARCH --------------------
 def get_author_search_names(author_entry: Dict[str, Any]) -> List[str]:
@@ -353,15 +353,13 @@ def efetch_details(
                     forelast = f"{fore} {last}"
 
                 if forelast in normalized_search_names:
-                    #print(f"{forelast} in the list of authors matched with {normalized_search_names}")
                     author_match = True
                     author_match_index = idx
                     wrong_author_flagged = False
                     break
                 elif any([last in n for n in normalized_search_names]) and len(last) > 1:
                     wrong_author_flagged = True
-                    #print(f"{forelast} wrong flagged the list of authors matched with {normalized_search_names}, last is {last} pmid is {pmid}")
-            
+                    
             if author_match_index is not None:
                 if author_match_index == 0:
                     first_author_count += 1
@@ -379,8 +377,6 @@ def efetch_details(
 
                     together = f"{fore} {last}"
                     if together.strip() == "": continue
-                    # fore = normalize_name(together.split(' ')[0]) # Re-split and take fore
-                    # last = normalize_name(together.split(' ')[-1]) # Re-split and take last
                         
                     if len(fore) < 2:
                         forelast = f"{last} {fore}"
@@ -388,14 +384,12 @@ def efetch_details(
                         forelast = f"{fore} {last}"
 
                     if normalize_name(forelast) in normalized_search_names:
-                        #print(f"{forelast} in the list of collabs matched with {normalized_search_names}")
                         collab_match = True
                         wrong_collab_flagged = False
                         break
                     elif any([normalize_name(last) in n for n in normalized_search_names]) and len(last) > 1:
                         wrong_collab_flagged = True
-                        #print(f"{forelast} wrong flagged the list of collabs matched with {normalized_search_names} pmid is {pmid}")
-
+                        
             # --------------- FILTERING LOGIC 2.0 -----------------
             status = []
             if dbg:
@@ -497,54 +491,133 @@ def write_df_to_worksheet(sh, title: str, df: pd.DataFrame):
         sheets_guard()
         ws.set_basic_filter()
 
-def write_meta_to_worksheet(sh):
-    ts = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+# --------------- CONFIG HELPERS ----------------
+def get_or_create_ws(sh, title: str, rows: int = 200, cols: int = 10):
     try:
-        ws = sh.worksheet("Meta")
+        return sh.worksheet(title)
     except gspread.WorksheetNotFound:
-        ws = safe_add_worksheet(sh, title="Meta", rows=10, cols=5)
+        return safe_add_worksheet(sh, title=title, rows=rows, cols=cols)
 
-    safe_update(ws, [["last_updated_utc", ts]], range_name="A1:B1")
+def parse_pipe_list(cell: str) -> List[str]:
+    if not cell:
+        return []
+    return [x.strip() for x in cell.split("|") if x.strip()]
 
-    ws.update(range_name="A1:B1", values=[["last_updated_utc", ts]])
+def parse_config_sheet(values: List[List[str]]) -> tuple[Dict[str, str], List[Dict[str, Any]]]:
+    """
+    Reads the single 'Config' sheet with [SETTINGS] and [AUTHORS] sections.
+    Returns: (settings_dict, authors_list)
+    """
+    settings: Dict[str, str] = {}
+    authors: List[Dict[str, Any]] = []
+
+    # normalize row widths
+    rows = [r + [""] * (3 - len(r)) for r in values]  # ensure at least 3 cols
+
+    mode = None
+    for r in rows:
+        a = (r[0] or "").strip()
+        b = (r[1] or "").strip()
+        c = (r[2] or "").strip()
+
+        if a == "[SETTINGS]":
+            mode = "settings"
+            continue
+        if a == "[AUTHORS]":
+            mode = "authors"
+            continue
+
+        if mode == "settings":
+            if not a or a.startswith("#"):
+                continue
+            # expect key/value in A/B
+            settings[a] = b
+
+        elif mode == "authors":
+            # skip header row
+            if a.lower() == "full_name":
+                continue
+            if not a:
+                continue
+
+            authors.append({
+                "full_name": a,
+                "other_names": parse_pipe_list(b),
+                "affiliations": parse_pipe_list(c),
+            })
+
+    return settings, authors
+
+def read_config_and_authors_from_sheet(sh) -> tuple[Dict[str, str], List[Dict[str, Any]]]:
+    ws = get_or_create_ws(sh, "Config", rows=300, cols=10)
+    values = ws.get_all_values()
+    if not values:
+        raise RuntimeError("Config sheet is empty. Add [SETTINGS] and [AUTHORS] sections.")
+
+    settings, authors = parse_config_sheet(values)
+
+    # minimal guards
+    if not authors:
+        raise RuntimeError("No authors found in Config sheet under [AUTHORS].")
+    return settings, authors
+
+def update_config_value(sh, key: str, value: str) -> None:
+    """
+    Updates the value in Config sheet for a settings key in the [SETTINGS] block.
+    """
+    ws = get_or_create_ws(sh, "Config", rows=300, cols=10)
+    values = ws.get_all_values()
+
+    # find the key row within settings section
+    in_settings = False
+    for i, r in enumerate(values, start=1):
+        a = (r[0] or "").strip() if len(r) > 0 else ""
+        if a == "[SETTINGS]":
+            in_settings = True
+            continue
+        if a == "[AUTHORS]":
+            break
+        if in_settings and a == key:
+            safe_update(ws, [[key, value]], range_name=f"A{i}:B{i}")
+            return
+
+    # if key not found, append it right after [SETTINGS] block header (simple fallback: append at end of settings block)
+    # append at end of sheet
+    safe_update(ws, values + [[key, value]])
 
 # -------------------- MAIN --------------------
 def main():
-    authors = load_yaml("config/authors.yaml") 
-    settings = load_yaml("config/settings.yaml")
+    gc = connect_gsheets()
+    sh = gc.open_by_key(os.getenv("SPREADSHEET_ID"))
+    settings, authors = read_config_and_authors_from_sheet(sh)
 
-    state = load_state("data/state.json")
-    now = datetime.now(timezone.utc)
-
-    state = load_state("data/state.json")
     now = datetime.now(timezone.utc)
 
     # -------------------- DATE WINDOW LOGIC --------------------
-    settings_start = (settings.get("starting_date") or "").strip()
-    settings_end = (settings.get("ending_date") or "").strip()
+    settings_start_raw = (settings.get("starting_date") or "").strip()
+    settings_end_raw   = (settings.get("ending_date") or "").strip()
 
-    if settings_start:
-        # ---- MANUAL OVERRIDE MODE ----
-        mindate = settings_start
-        maxdate = settings_end if settings_end else ymd(now)
-        update_state = False
-        seen = set()
+    # If starting_date is provided => manual override mode (DO NOT update last_run_utc)
+    if settings_start_raw:
+        mindate = parse_date_to_ymd(settings_start_raw, now)
+        maxdate = parse_date_to_ymd(settings_end_raw, now) if settings_end_raw else ymd(now)
+        update_last_run = False
     else:
-        # ---- INCREMENTAL MODE ----
-        last_run = state.get("last_run_utc")
-        seen = set(state["seen_pmids"])
-        if last_run:
-            mindate = ymd(iso_to_utc_dt(last_run))
+        # incremental mode: use last_run_utc from sheet; fallback 30 days
+        last_run_utc = (settings.get("last_run_utc") or "").strip()
+        if last_run_utc:
+            last_run_dt = iso_to_utc_dt(last_run_utc)
+            mindate = ymd(last_run_dt)
         else:
-            # first-ever run fallback
             mindate = ymd(now - timedelta(days=30))
 
         maxdate = ymd(now)
-        update_state = True
-    
+        update_last_run = True
+
     print(f"[DEBUG] Date window: {mindate} → {maxdate}")
 
-    start_dt = datetime.strptime(mindate, "%Y-%m-%d")
+    start_dt = datetime.strptime(mindate, "%Y/%m/%d")
     end_dt   = datetime.strptime(maxdate, "%Y/%m/%d")
     period_months = (end_dt.year - start_dt.year) * 12 + (end_dt.month - start_dt.month)
 
@@ -593,8 +666,6 @@ def main():
         for r in rows:
             r["tracked_author"] = full_name
             all_rows.append(r)
-
-        seen.update(new_pmids)
 
     dbg.close()
     print(f"Debug log written to {dbg.name}")
@@ -647,8 +718,8 @@ def main():
     )
 
     # -------------------- THEME ANALYTICS (LLM) --------------------
-    THEME_MAX_PAPERS = 50  # safety cap to limit tokens
-    theme_df = df.head(THEME_MAX_PAPERS)
+    THEME_MAX_PAPERS = total_articles // 2  # safety cap to limit tokens
+    theme_df = master_df.head(THEME_MAX_PAPERS)
     papers_for_llm = []
 
     for _, row in theme_df.iterrows():
@@ -660,18 +731,12 @@ def main():
 
     themes = {}
     if papers_for_llm:
-        # try:
-            themes = gemini_extract_themes(papers_for_llm)
-            print("[DEBUG] Extracted themes via Gemini")
-        # except Exception as e:
-        #     print("[WARN] Theme extraction failed:", e)
+        themes = gemini_extract_themes(papers_for_llm)
+        print("[DEBUG] Extracted themes via Gemini")
 
 
     os.makedirs("out", exist_ok=True)
     df.to_csv("out/master.csv", index=False)
-
-    gc = connect_gsheets()
-    sh = gc.open_by_key(os.getenv("SPREADSHEET_ID"))
 
     write_df_to_worksheet(sh, "Low Confidence Articles", low_conf_df)
     write_df_to_worksheet(sh, "Master", master_df)
@@ -696,13 +761,8 @@ def main():
         sheets_guard()
         ws.set_basic_filter()
 
-    write_meta_to_worksheet(sh)
-
-    if update_state:
-        state["last_run_utc"] = now.isoformat()
-        state["seen_pmids"] = sorted(seen)
-        save_state("data/state.json", state)
-
+    if update_last_run:
+        update_config_value(sh, "last_run_utc", now.isoformat())
 
     print("Run complete: Google Sheet updated.")
 
