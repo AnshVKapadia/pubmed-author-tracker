@@ -4,11 +4,14 @@ import time
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, TextIO
+from collections import Counter
 import requests
 import pandas as pd
 import yaml
 import xml.etree.ElementTree as ET
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+import unicodedata
+import re
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -17,10 +20,14 @@ from dotenv import load_dotenv
 load_dotenv()
 from threading import Lock
 
+from google import genai
+from pydantic import BaseModel, Field
+
 EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 
 api_key = os.getenv("NCBI_API_KEY")
 google_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+llm_key = os.getenv("GEMINI_API_KEY")
 
 if not api_key:
     print("Warning: NCBI_API_KEY not set; PubMed requests will use lower rate limits.")
@@ -29,6 +36,67 @@ if not google_json:
         "Missing GOOGLE_APPLICATION_CREDENTIALS_JSON. "
         "Set it in your local .env or as a GitHub Actions secret."
     )
+
+# ----------------- GEMINI LOGIC + HELPERS  ---------------------
+client = genai.Client(api_key=llm_key)
+
+def build_theme_prompt(papers: list[dict]) -> str:
+        return f"""
+    You are a research analyst.
+
+    TASK:
+    Identify the top 5 research themes represented across the provided articles.
+
+    WHAT IS A THEME:
+    A recurring scholarly focus such as:
+    - topic or subject area
+    - methodology or study design
+    - population or sample type
+    - intervention, exposure, or technique
+    - outcome, objective, or research question
+
+    RULES:
+    - Use ONLY the provided titles and abstracts.
+    - Do NOT infer information that is not explicitly present.
+    - Do NOT assume author intent, institutions, or fields.
+    - Group closely related concepts into a single theme.
+    - Rank themes by number of articles contributing (rank 1 = most frequent).
+
+    ARTICLES:
+    {json.dumps(papers, indent=2)}
+    """.strip()
+
+def extract_json_llm(text: str) -> dict:
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1:
+        raise ValueError("No JSON found")
+    return json.loads(text[start:end+1])
+
+class Theme(BaseModel):
+    rank: int = Field(ge=1, le=5)
+    name: str
+    article_count: int = Field(ge=0)
+    description: str
+
+class ThemesOut(BaseModel):
+    themes: list[Theme] = Field(min_length=5, max_length=5)
+
+def gemini_extract_themes(papers: list[dict]) -> dict:
+    prompt = build_theme_prompt(papers)
+
+    resp = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+        config={
+            "temperature": 0.2,
+            "response_mime_type": "application/json",
+            "response_json_schema": ThemesOut.model_json_schema(),
+        },
+    )
+    parsed = ThemesOut.model_validate_json(resp.text)
+    return parsed.model_dump()
+
 
 # ----------------- LOGGING HELPERS --------------------
 def ensure_logs_dir() -> None:
@@ -110,9 +178,6 @@ def get_author_search_names(author_entry: Dict[str, Any]) -> List[str]:
 
     return final
 
-import unicodedata
-import re
-
 def normalize_name(s: str) -> str:
     if not s:
         return ""
@@ -121,6 +186,16 @@ def normalize_name(s: str) -> str:
     s = s.lower()
     s = re.sub(r"[^a-z\s]", "", s)
     return re.sub(r"\s+", " ", s).strip()
+
+def first_n_words(text: str, n: int = 75) -> str:
+    """
+    Return the first n words of text.
+    Safe for None / empty input.
+    """
+    if not text:
+        return ""
+    words = text.split()
+    return " ".join(words[:n])
 
 def build_query(author_name: str, mindate: str, maxdate: str) -> str:
     return (
@@ -157,10 +232,31 @@ def esearch_pmids(query: str, tool, email, api_key) -> List[str]:
 def _text(node: Optional[ET.Element]) -> str:
     return node.text.strip() if node is not None and node.text else ""
 
+def normalize_article_types(pub_types: List[str]) -> Dict[str, bool]:
+    pt = {p.lower() for p in pub_types}
+
+    return {
+        "is_review": "review" in pt,
+        "is_clinical_trial": any("clinical trial" in p for p in pt),
+        "is_case_report": "case reports" in pt,
+        "is_meta_analysis": "meta-analysis" in pt,
+        "is_guideline": "practice guideline" in pt,
+        "is_editorial": "editorial" in pt,
+        "is_letter": "letter" in pt,
+        "is_journal_article": "journal article" in pt,
+    }
+
+def extract_abstract(article: ET.Element) -> str:
+    parts = []
+    for a in article.findall(".//AbstractText"):
+        if a.text:
+            parts.append(a.text.strip())
+    return " ".join(parts)
+
 # -------------------- EFETCH + FILTER --------------------
 def efetch_details(
     pmids: List[str],
-    author_entry: Dict[str, Any],   # ← ADD THIS
+    author_entry: Dict[str, Any],
     search_names: List[str],
     tool: Optional[str],
     email: Optional[str],
@@ -169,8 +265,11 @@ def efetch_details(
 ) -> List[Dict[str, Any]]:
 
     if not pmids:
-        return []
+        return [], 0, 0
     
+    first_author_count = 0
+    last_author_count = 0
+ 
     affiliations = author_entry.get("affiliations", [])
 
     normalized_search_names = {
@@ -201,6 +300,18 @@ def efetch_details(
         for article in root.findall(".//PubmedArticle"):
             pmid = _text(article.find(".//PMID"))
 
+            abstract_full = extract_abstract(article)
+            abstract_short = first_n_words(abstract_full, 75)
+
+            # ------------------ ARTICLE TYPE ------------------
+            pub_types = [
+                _text(pt)
+                for pt in article.findall(".//PublicationType")
+                if _text(pt)
+            ]
+
+            ptypes = normalize_article_types(pub_types)
+
             # ------------------ AFFILIATIONS ------------------
             affs = [
                 (aff.text or "").strip().replace(',','')
@@ -208,20 +319,24 @@ def efetch_details(
                 if aff.text
             ]
 
-            affiliation_match = any(
+            aff_match_tracking = [
                 kw.lower() in aff.lower()
                 for kw in affiliations
                 for aff in affs
-            )
+            ]
+
+            affiliation_match = any(aff_match_tracking)
+            other_affs_exist = not all(aff_match_tracking) and len(affs) > 0
 
             # ------------------ AUTHOR NAME MATCHING ------------------
             author_elems = article.findall(".//Author")
 
             author_names = []
             author_match = False
+            author_match_index = None
             wrong_author_flagged = False
 
-            for a in author_elems:
+            for idx, a in enumerate(author_elems):
                 last = normalize_name(_text(a.find("LastName")))
                 fore = normalize_name(_text(a.find("ForeName")))
                 init = normalize_name(_text(a.find("Initials")))    
@@ -240,11 +355,18 @@ def efetch_details(
                 if forelast in normalized_search_names:
                     #print(f"{forelast} in the list of authors matched with {normalized_search_names}")
                     author_match = True
+                    author_match_index = idx
                     wrong_author_flagged = False
                     break
                 elif any([last in n for n in normalized_search_names]) and len(last) > 1:
                     wrong_author_flagged = True
                     #print(f"{forelast} wrong flagged the list of authors matched with {normalized_search_names}, last is {last} pmid is {pmid}")
+            
+            if author_match_index is not None:
+                if author_match_index == 0:
+                    first_author_count += 1
+                elif author_match_index == len(author_elems) - 1:
+                    last_author_count += 1
 
             collab_match = False
             wrong_collab_flagged = False
@@ -324,11 +446,14 @@ def efetch_details(
                 "pub_year": _text(article.find(".//PubDate/Year")),
                 "doi": doi,
                 "authors": "; ".join(author_names),
+                "article_types": "; ".join(pub_types),
+                "abstract": abstract_short,
                 "pubmed_url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
                 "status": status,
+                "other_institutions": int(other_affs_exist),
             })
 
-    return rows
+    return rows, first_author_count, last_author_count
 
 # -------------------- GOOGLE SHEETS --------------------
 
@@ -385,7 +510,7 @@ def write_meta_to_worksheet(sh):
 
 # -------------------- MAIN --------------------
 def main():
-    authors = load_yaml("config/authors2.yaml") 
+    authors = load_yaml("config/authors.yaml") 
     settings = load_yaml("config/settings.yaml")
 
     state = load_state("data/state.json")
@@ -418,9 +543,15 @@ def main():
         update_state = True
     
     print(f"[DEBUG] Date window: {mindate} → {maxdate}")
-    all_rows = []
 
+    start_dt = datetime.strptime(mindate, "%Y-%m-%d")
+    end_dt   = datetime.strptime(maxdate, "%Y/%m/%d")
+    period_months = (end_dt.year - start_dt.year) * 12 + (end_dt.month - start_dt.month)
+
+    all_rows = []
     dbg = open_debug_log()
+
+    total_fa, total_la = 0, 0
 
     for a in authors:
         full_name = a["full_name"]
@@ -446,7 +577,7 @@ def main():
 
         new_pmids = list(pmids)
 
-        rows = efetch_details(
+        rows, fa_cnt, la_cnt = efetch_details(
             new_pmids,
             a,                    # ← PASS FULL YAML ENTRY
             search_names,
@@ -455,6 +586,9 @@ def main():
             api_key=api_key,
             dbg=dbg,
         )
+
+        total_fa += fa_cnt
+        total_la += la_cnt
 
         for r in rows:
             r["tracked_author"] = full_name
@@ -472,16 +606,66 @@ def main():
         "pub_year",
         "doi",
         "authors",
+        "abstract",
+        "article_types",
         "pubmed_url",
         "tracked_author",
         "status",
+        "other_institutions",  # ← REQUIRED
     ]
 
     LOW_CONF_KEYWORDS = ("AFF NOT FOUND", "AFF MISMATCH")
 
     df = pd.DataFrame(all_rows, columns=EXPECTED_COLS)
+    df = df.drop_duplicates(subset=["pmid"])
+
     low_conf_df = df[df["status"].str.contains("|".join(LOW_CONF_KEYWORDS), na=False)]
     master_df = df[~df.index.isin(low_conf_df.index)]
+
+    total_articles = master_df["pmid"].nunique()
+
+    per_faculty_counts = (
+        master_df.groupby("tracked_author")["pmid"]
+        .nunique()
+    )
+
+    median_per_faculty = per_faculty_counts.median()
+    range_per_faculty = (per_faculty_counts.min(), per_faculty_counts.max())
+
+    n_faculty = per_faculty_counts.shape[0]
+    pct_gt_1 = (per_faculty_counts > 1).sum() / n_faculty * 100
+    pct_gt_3 = (per_faculty_counts > 3).sum() / n_faculty * 100
+    pct_gt_5 = (per_faculty_counts > 5).sum() / n_faculty * 100
+
+    article_type_counter = Counter()
+
+    for types in master_df["article_types"]:
+        article_type_counter.update(types.split("; "))
+
+    article_types_summary = dict(
+        sorted(article_type_counter.items(), key=lambda x: x[1], reverse=True)
+    )
+
+    # -------------------- THEME ANALYTICS (LLM) --------------------
+    THEME_MAX_PAPERS = 50  # safety cap to limit tokens
+    theme_df = df.head(THEME_MAX_PAPERS)
+    papers_for_llm = []
+
+    for _, row in theme_df.iterrows():
+        papers_for_llm.append({
+            "pmid": row["pmid"],
+            "title": row["title"],
+            "abstract": row["abstract"]
+        })
+
+    themes = {}
+    if papers_for_llm:
+        # try:
+            themes = gemini_extract_themes(papers_for_llm)
+            print("[DEBUG] Extracted themes via Gemini")
+        # except Exception as e:
+        #     print("[WARN] Theme extraction failed:", e)
+
 
     os.makedirs("out", exist_ok=True)
     df.to_csv("out/master.csv", index=False)
@@ -521,6 +705,44 @@ def main():
 
 
     print("Run complete: Google Sheet updated.")
+
+    analytics = {
+        "period_months": period_months,
+        "total_articles": int(total_articles),
+
+        "per_faculty": {
+            "median": float(median_per_faculty),
+            "range": {
+                "min": int(range_per_faculty[0]),
+                "max": int(range_per_faculty[1]),
+            }
+        },
+
+        "faculty_productivity_percentages": {
+            ">1_publication": round(pct_gt_1, 2),
+            ">3_publications": round(pct_gt_3, 2),
+            ">5_publications": round(pct_gt_5, 2),
+        },
+
+        "authorship": {
+            "first_author_publications": int(total_fa),
+            "last_author_publications": int(total_la),
+        },
+
+        "collaboration": {
+            "articles_with_other_institutions": int(
+                master_df["other_institutions"].sum()
+            )
+        },
+
+        "article_types": article_types_summary,
+
+        "themes": themes
+    }
+
+    print("\n===== ANALYTICS SUMMARY =====")
+    print(json.dumps(analytics, indent=2))
+    print("===== END ANALYTICS =====\n")
 
 if __name__ == "__main__":
     main()
