@@ -1,397 +1,173 @@
-# PubMed Author Research Tracker
+# PubMed Author Tracker
 
-A Google Sheets-based PubMed tracking pipeline that monitors research publications for a configurable list of faculty/authors, validates author identity and affiliation, removes duplicate papers, separates low-confidence matches, and generates research analytics including authorship counts, article types, collaboration indicators, and AI-generated publication themes.
+Track a faculty roster in Google Sheets, retain publication history, and generate calendar-quarter summaries. Python collects PubMed records; Google Sheets is the editable roster and reporting interface. Runs are read-only unless `--publish` is explicitly supplied.
 
-This project was designed for departments, labs, and research groups that want a lightweight way to track faculty publications over time without manually searching PubMed.
+## Quick start
 
----
+Use Python 3.11 or 3.13. From the repository root:
 
-## Features
-
-- Searches PubMed for each tracked author using multiple name variants
-- Pulls article metadata directly from PubMed XML
-- Supports author aliases such as:
-  - `Vishal S Kapadia`
-  - `Vishal Kapadia`
-  - `Kapadia VS`
-  - `Kapadia V`
-- Checks whether the matched author appears in the article author list or investigator list
-- Checks whether article affiliations match the institution of interest
-- Separates low-confidence affiliation matches into a separate sheet
-- Deduplicates publications by PMID so the same paper is not counted multiple times
-- Generates one master publication table
-- Generates individual author tabs
-- Computes analytics such as:
-  - reporting period in months
-  - total unique articles
-  - median and range of publications per faculty member
-  - percent of faculty with more than 1, 3, and 5 publications
-  - first-author publication count
-  - last-author publication count
-  - article type counts
-  - number of publications involving other institutions
-  - top 5 AI-generated research themes
-- Uses Google Sheets as the main user-facing interface
-- Can be run manually, through Windows Task Scheduler, or through GitHub Actions
-
----
-
-## Project Structure
-
-```text
-pubmed-author-tracker/
-│
-├── src/
-│   └── script.py
-│
-├── logs/
-│   └── debug_*.txt
-│
-├── out/
-│   └── master.csv
-│
-├── requirements.txt
-├── .env
-└── README.md
+```bash
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+# macOS/Linux: source .venv/bin/activate
+python -m pip install -r requirements.txt -c requirements.lock
+python -m unittest discover -s tests -v
 ```
 
----
+Try the complete pipeline with synthetic data, without Google credentials or network requests:
 
-## How It Works
-
-The pipeline uses a Google Sheet as its configuration and output dashboard.
-
-Users enter faculty information into a `Config` sheet. The script reads that configuration, searches PubMed, fetches article XML, filters matches, writes results back to Google Sheets, and prints analytics to stdout.
-
-The pipeline has two date modes.
-
-### Incremental Mode
-
-If `starting_date` is blank, the script uses `last_run_utc` from the Google Sheet and searches from the last run date to the current date.
-
-After a successful run, it updates `last_run_utc`.
-
-### Manual Override Mode
-
-If `starting_date` is filled in, the script searches from `starting_date` to `ending_date`.
-
-In this mode, `last_run_utc` is not updated.
-
----
-
-## Google Sheet Setup
-
-Create a Google Sheet with a tab named:
-
-```text
-Config
+```bash
+python src/script.py --config examples/Config.tsv --pubmed-xml tests/fixtures/pubmed.xml --quarter 2026-Q3 --dry-run
 ```
 
-The `Config` sheet should contain two sections:
+Reports appear in `out/`. The original `python src/script.py` entry point is retained, but now defaults to a dry run.
+
+## Existing Google Sheet setup
+
+Keep the existing `Config` tab. The original three-column author layout is supported. [examples/Config.tsv](examples/Config.tsv) is a copyable template with optional settings and an optional fourth ORCID column.
 
 ```text
 [SETTINGS]
-key	value
-starting_date	
-ending_date	
-last_run_utc	
-ncbi_tool	pubmed-author-tracker
-ncbi_email	your-email@example.com
+key                 value
+starting_date
+ending_date
+last_run_utc
+history_start_date
+ncbi_tool           pubmed-author-tracker
+ncbi_email          your-contact-email@example.com
+themes_enabled      false
+gemini_model
+theme_max_papers     100
 
 [AUTHORS]
-full_name	other_names	affiliations
-Vishal S Kapadia	Vishal S Kapadia|Kapadia VS|Vishal Kapadia|Kapadia V	UT Southwestern|UTSW|University of Texas Southwestern|University of Texas Southwestern Medical Center
-Myra H Wyckoff	Myra H Wyckoff|Wyckoff MH|Myra Wyckoff|Wyckoff M	UT Southwestern|UTSW|University of Texas Southwestern|University of Texas Southwestern Medical Center
+full_name           other_names                  affiliations            orcid
+Jane A Smith        Jane Smith|Smith JA          UT Southwestern|UTSW
 ```
 
-Use the pipe character `|` to separate multiple aliases or affiliations.
+Use `|` between aliases or institution keywords. Faculty names must be unique and valid worksheet titles. Keep `last_run_utc` inside `[SETTINGS]`, even when its value is blank. Dates use `YYYY-MM-DD` or `YYYY/MM/DD`. The tracker validates these inputs before querying PubMed.
 
----
+1. Enable **Google Sheets API** in the existing Google Cloud project. The tracker uses only the Sheets scope; Google Drive API is not required for normal runs.
+2. Share the spreadsheet with the existing service account's email as **Editor**.
+3. Copy `.env.example` to `.env` and set:
 
-## Output Sheets
+   | Environment variable | Purpose |
+   | --- | --- |
+   | `SPREADSHEET_ID` | ID between `/d/` and `/edit` in the spreadsheet URL |
+   | `GOOGLE_APPLICATION_CREDENTIALS_JSON` | Full service-account JSON, stored as one environment variable |
+   | `NCBI_API_KEY` | Optional higher NCBI rate limit |
+   | `GEMINI_API_KEY` | Optional AI themes |
 
-The script writes several output tabs to the same Google Sheet.
+Do not commit credentials or put them in spreadsheet cells. Existing GitHub Actions secrets with these names are supported; a new Google Cloud project or key is not inherently necessary.
 
-### `Master`
-
-Contains high-confidence articles only.
-
-Low-confidence articles are removed from this tab.
-
-### `Low Confidence Articles`
-
-Contains articles where the author may match, but the affiliation is missing or does not clearly match the institution.
-
-These are usually articles that should be manually reviewed.
-
-### Individual Author Tabs
-
-For each author with high-confidence publications, the script creates a separate tab using the author’s full name.
-
-Example:
-
-```text
-Vishal S Kapadia
-Myra H Wyckoff
-Lina F Chalak
-```
-
----
-
-## Deduplication Logic
-
-The script deduplicates articles by PMID.
-
-This is important because the same article may appear multiple times if:
-
-- multiple tracked faculty are authors on the same paper
-- multiple aliases for the same author return the same PMID
-- the author appears in both author and collaborator/investigator fields
-
-After all article rows are collected, the dataframe is deduplicated using:
-
-```python
-df = df.drop_duplicates(subset=["pmid"])
-```
-
-This prevents the same publication from being counted multiple times in the analytics.
-
----
-
-## Match Confidence Logic
-
-The script separates matches into several status categories:
-
-```text
-AUTHOR MATCH
-COLLABORATOR MATCH
-AFF MATCH
-AFF MISMATCH
-AFF NOT FOUND
-AUTHOR MISMATCH
-COLLABORATOR MISMATCH
-NOT FOUND
-```
-
-Articles with these statuses are treated as low confidence:
-
-```text
-AFF NOT FOUND
-AFF MISMATCH
-```
-
-Those articles are sent to the `Low Confidence Articles` tab instead of the main `Master` tab.
-
----
-
-## Analytics Generated
-
-At the end of the run, the script prints a JSON analytics summary.
-
-Example:
-
-```json
-{
-  "period_months": 3,
-  "total_articles": 42,
-  "per_faculty": {
-    "median": 1.0,
-    "range": {
-      "min": 0,
-      "max": 6
-    }
-  },
-  "faculty_productivity_percentages": {
-    ">1_publication": 25.0,
-    ">3_publications": 8.33,
-    ">5_publications": 2.08
-  },
-  "authorship": {
-    "first_author_publications": 5,
-    "last_author_publications": 12
-  },
-  "collaboration": {
-    "articles_with_other_institutions": 18
-  },
-  "article_types": {
-    "Journal Article": 30,
-    "Review": 5,
-    "Clinical Trial": 2
-  },
-  "themes": {
-    "themes": [
-      {
-        "rank": 1,
-        "name": "Neonatal outcomes",
-        "article_count": 12,
-        "description": "Studies focused on health outcomes in newborn and neonatal populations."
-      }
-    ]
-  }
-}
-```
-
----
-
-## Environment Variables
-
-Create a `.env` file in the project root.
-
-```env
-SPREADSHEET_ID=your_google_sheet_id_here
-GOOGLE_APPLICATION_CREDENTIALS_JSON={"type":"service_account",...}
-NCBI_API_KEY=your_ncbi_api_key_here
-GEMINI_API_KEY=your_gemini_api_key_here
-```
-
-### Required
-
-```text
-SPREADSHEET_ID
-GOOGLE_APPLICATION_CREDENTIALS_JSON
-```
-
-### Recommended
-
-```text
-NCBI_API_KEY
-GEMINI_API_KEY
-```
-
-`NCBI_API_KEY` is recommended because it increases PubMed request limits.
-
-`GEMINI_API_KEY` is used for AI-generated research theme extraction.
-
----
-
-## Google Service Account Setup
-
-1. Create a Google Cloud project.
-2. Enable:
-   - Google Sheets API
-   - Google Drive API
-3. Create a service account.
-4. Generate a JSON key for the service account.
-5. Copy the full JSON into the `GOOGLE_APPLICATION_CREDENTIALS_JSON` environment variable.
-6. Share your Google Sheet with the service account email.
-
-The service account email usually looks like:
-
-```text
-something@project-name.iam.gserviceaccount.com
-```
-
-Give it editor access to the Google Sheet.
-
----
-
-## Installation
-
-Install dependencies:
+Validate and preview before publishing:
 
 ```bash
-pip install -r requirements.txt
+python src/script.py --check-config
+python src/script.py --dry-run
+python src/script.py --publish
 ```
 
-Example `requirements.txt`:
+A local TSV can be used with `--config` for collection without Google authentication. Add `--history out/history.csv` to merge a prior local report. Publishing always reads live Config and History from the target spreadsheet; fixtures, saved snapshots, and local history cannot be published.
 
-```txt
-requests
-pandas
-PyYAML
-tenacity
-gspread
-google-auth
-python-dotenv
-google-genai
-pydantic
-```
+## History and reports
 
----
+- **History:** one row per PMID and faculty member, including uncertain matches. This is the durable source of publication-faculty relationships.
+- **Master:** accepted publications, one row per PMID. `tracked_author` lists every matched faculty member.
+- **Low Confidence Articles:** uncertain or rejected faculty-paper matches, with the evidence status. This is a generated view.
+- **Individual faculty tabs:** all accepted historical matches for that faculty member. Empty faculty tabs are refreshed too.
+- **Faculty Summary:** quarter counts and cumulative counts for every currently configured faculty member, including zero counts.
+- **Quarterly Summary:** unique publication totals and productivity statistics for quarters represented in the retained history.
+- **Summary:** the selected quarter and a versioned `analytics_json` value suitable for an email integration.
+- **History Backup:** the preceding history, replaced atomically with each successful publication. Use it to recover the previous state if necessary.
 
-## Running the Script
+Only the current roster contributes to Master and summary metrics; records for removed faculty remain in History. A shared paper counts once in department totals and once for each matching faculty member's productivity. First/last authorship statistics count unique publications with a tracked faculty member in that position; a sole author is both first and last. Investigator credit does not count as byline authorship.
 
-From the project root:
+### Review decisions
+
+Edit only the **History** row's `decision` (`auto`, `accept`, or `reject`) and `review_notes` columns. Find the row by both PMID and faculty member. Decisions and notes survive metadata refreshes and reruns. Other report tabs are regenerated from History; edits to their copied review fields do not become source decisions.
+
+`auto` accepts a full-name/ORCID match with that person's own institutional affiliation. Initials-only evidence, absent affiliations, affiliation mismatches, and legacy records awaiting validation remain reviewable. ORCID is used when configured and present in the PubMed record. Rule-based matching still requires human review for ambiguous identities.
+
+Do not rename managed headers or add custom columns to generated tabs. Use a separate tab for formulas and annotations, or History's review notes. Publishing stops on unexpected headers or formulas instead of overwriting them.
+
+### First migration
+
+When History does not exist, the tracker imports records from Master, Low Confidence Articles, and existing faculty tabs. It fetches the associated PubMed metadata again and checks every fetched publication against the current roster, recovering shared-paper relationships discarded by the old global deduplication. Existing records that cannot be revalidated remain in History for review.
+
+A pre-run spreadsheet snapshot is saved locally before collection. Existing retained records are preserved, but papers absent from every old tab cannot be recovered without a backfill. Copy the original workbook before the first production publication; verify a dry run or test copy first.
+
+## Reporting dates and collection dates
+
+The default report is the **last completed calendar quarter**: a run on October 16 reports July 1–September 30. Select another quarter with `--quarter 2026-Q2`.
+
+Collection is independent of reporting:
+
+- An incremental collection searches from 91 days before `last_run_utc` through today. With no checkpoint, it starts at the previous quarter's beginning.
+- It searches **publication date OR PubMed create date**, helping catch older papers added to PubMed recently.
+- Explicit full-name searches include missing-affiliation records. Initials-only aliases require an article-level institutional clue to avoid thousands of unrelated candidates. The subsequent matcher still checks the tracked person's own affiliation. An initials-only record without any institutional clue may therefore be missed.
+- Known historical PMIDs are fetched again and refreshed. Corrections to unknown older records outside the overlap window may require a backfill.
+- `history_start_date`, when populated, expands every incremental search back to that date. Leave it blank for routine incremental runs; use a manual backfill for a one-time recovery.
+
+Backfill example:
 
 ```bash
-python src/script.py
+python src/script.py --start 2024-01-01 --end 2026-09-30 --quarter 2026-Q3 --dry-run
+# After inspection, repeat with --publish.
 ```
 
-The script will:
+Manual `--start`/`--end` or Config `starting_date`/`ending_date` overrides merge into history but do not advance `last_run_utc`. Clear Config overrides after use. Summary dates use the journal issue date, with electronic publication date as a fallback if no journal month is available. Year-only/seasonal dates remain in cumulative history but are not assigned to a quarter; their count is disclosed.
 
-1. Read the Google Sheet config.
-2. Search PubMed.
-3. Fetch article XML.
-4. Match authors and affiliations.
-5. Deduplicate publications.
-6. Write results to Google Sheets.
-7. Print analytics to stdout.
-8. Update `last_run_utc` if running in incremental mode.
+## Reliable publishing and recovery
 
----
+The tracker retrieves shared PMIDs once, paginates search results, splits queries that exceed PubMed's 9,999-record retrieval window, paces requests, and retries transient NCBI and Sheets read failures. Incomplete API responses stop publication rather than appearing as an empty successful search.
 
-## Scheduling Quarterly Runs
+Local outputs include `master.csv`, `history.csv`, `history-before.csv`, `review.csv`, `faculty.csv`, `quarterly.csv`, `summary.csv`, and `analytics.json`. With Sheets input, snapshots are stored in `out/backups/` and `out/sheets-backup.json`.
 
-### Option 1: Windows Task Scheduler
+Publishing sizes grids, replaces report data, removes obsolete trailing rows, and advances the successful collection checkpoint in **one atomic Sheets batch**. It rechecks Config and History immediately before publishing so edits made during collection cause a safe stop. GitHub concurrency prevents overlapping workflow publishers; avoid running another local publisher at the same time.
 
-This is the simplest local option.
+A network failure during a write can make the result uncertain. The tracker verifies Summary's unique report JSON before declaring success; it does not blindly replay sheet creation. If verification fails, inspect Summary and the saved outputs before retrying.
 
-Create a scheduled task that runs:
+For rollback, stop publishers, copy the affected workbook, and restore History from History Backup or the saved JSON/CSV. Restore the previous checkpoint from the pre-run snapshot if necessary, then dry-run before publishing again. Repeated runs merge by PMID plus faculty member, so retrying collection does not duplicate history.
+
+Atomic batches above 8 MiB or cells above Google's 50,000-character limit stop with local reports saved. This implementation favors a verifiable atomic report over partial publication; a larger installation may need staged writes or a database.
+
+## GitHub Actions
+
+`Tracker checks` runs on pushes and pull requests, installing the tested core dependency set and running secret-free regression tests on Python 3.11 and 3.13.
+
+`Quarterly PubMed Update` runs at 06:17 UTC on January 1, April 1, July 1, and October 1. It tests before collection and publishes on scheduled runs. Manual dispatch defaults to a **dry run** and supports publication, backfill dates, a report quarter, and optional themes.
+
+Configure the same environment variables above as repository **Actions secrets**. Scheduled and manual publication runs share a concurrency group, have a 30-minute timeout, and leave a run summary. Update the dependency lock intentionally after testing a fresh environment.
+
+This repository is public. Report artifacts can contain review notes and a snapshot of private spreadsheet configuration. Uploads are disabled by default. Set the repository variable `UPLOAD_REPORT_ARTIFACTS=true` only if that artifact visibility is appropriate; enabled artifacts expire after 30 days. Otherwise reports and the previous-history backup remain in Sheets. Logs and run summaries are visible according to repository visibility.
+
+GitHub schedules can be delayed, and [public-repository workflows may be disabled after 60 days of inactivity](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/disable-and-enable-workflows). Check the Actions page for failures or disabled schedules. Use an external scheduler if unattended operation without this GitHub limitation is required.
+
+## Optional Gemini themes
+
+Core tracking does not depend on Gemini or its SDK. To enable themes:
 
 ```bash
-python C:\path\to\pubmed-author-tracker\src\script.py
+python -m pip install -r requirements-ai.txt -c requirements.lock
 ```
 
-Set the schedule to run every 3 months.
+Set `themes_enabled=true`, `gemini_model` to a currently available model in your Gemini account, and optionally `theme_max_papers` (blank defaults to 100; maximum 500). Supply `GEMINI_API_KEY`. `--themes` enables it for one run. Actions attempts the optional SDK installation when a Gemini key is configured, and core reporting continues if it fails.
 
-Make sure the task starts in the project folder so `.env` loads correctly.
+Themes use only accepted publications in the selected quarter. Sampling is deterministic by descending PMID, abstracts are limited to 6,000 characters, and coverage is disclosed. Generated PMID references are checked against the sample; counts are derived from those references. This checks evidence IDs, not the scientific quality of the thematic interpretation. Missing keys, unavailable models, missing SDKs, and provider failures do not prevent reports from being published.
 
-### Option 2: GitHub Actions
+## Email automation
 
-This is better for cloud automation.
+The previous README suggested Apps Script but did not contain an implementation. API writes do not fire edit triggers. See [apps-script/README.md](apps-script/README.md) for recovery steps and a new disabled-by-default clock-trigger integration. It requires deliberate recipient setup and installation; updating this repository alone does not send email or install a Google trigger.
 
-A scheduled GitHub Actions workflow can run the script quarterly using repository secrets for the environment variables.
+## Project structure
 
----
+```text
+src/script.py          Existing entry point
+src/tracker/           Configuration, PubMed, matching, reports, Sheets, CLI, optional AI
+examples/Config.tsv    Synthetic, copyable configuration
+tests/                 Offline regression tests and PubMed fixture
+apps-script/           Optional email integration and setup guide
+.github/workflows/     CI and quarterly publication workflow
+```
 
-## Google Apps Script Email Updates
-
-A Google Apps Script can be attached to the output Google Sheet to email a summary after the analytics cell is updated.
-
-This allows the Python script to focus on data collection while Google Sheets handles email notifications.
-
----
-
-## Current Limitations
-
-- Author matching is rule-based and depends on aliases provided in the Config sheet.
-- Common names may still require manual review.
-- Affiliation matching is based on keyword matching.
-- Low-confidence articles should be reviewed manually.
-- AI theme extraction depends on the Gemini API and may occasionally require retry logic.
-- The same PMID is counted once globally, so multi-faculty coauthored papers are not double-counted in total article counts.
-
----
-
-## Future Improvements
-
-Potential future features include:
-
-- A Streamlit or web dashboard
-- More advanced author disambiguation
-- ORCID support
-- Better affiliation-to-author backtracking
-- Automated email reports
-- Historical trend charts
-- Quarterly PDF reports
-- Institution-level collaboration network graphs
-- Manual review buttons for low-confidence articles
-- Config template auto-generation
-
----
-
-## Intended Use
-
-This project is intended for research groups, departments, or faculty teams that want an easy way to monitor PubMed publication activity over time using Google Sheets as the main dashboard.
-
-It is especially useful when tracking multiple faculty members across recurring reporting periods such as monthly, quarterly, or yearly publication reviews.
+The tracked legacy `config/*.yaml` and journal lookup CSV are not used by the new or previous sheet-driven entry point. They are retained as historical files; the editable roster lives in Config. Files under ignored `data/`, `out/`, `logs/`, and `.env` should remain local.

@@ -2,6 +2,8 @@
 data/
 config/
 .env
+.env.*
+!.env.example
 
 # outputs
 out/
@@ -11,6 +13,7 @@ logs/
 __pycache__/
 *.pyc
 .venv/
+.venv-*/
 .env
 .DS_Store
 

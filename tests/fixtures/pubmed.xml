@@ -1,0 +1,47 @@
+<?xml version="1.0"?>
+<PubmedArticleSet>
+  <PubmedArticle>
+    <MedlineCitation><PMID>1001</PMID><Article>
+      <ArticleTitle>A study with <i>nested</i> title text</ArticleTitle>
+      <Journal><Title>Example Journal</Title><JournalIssue><PubDate><Year>2026</Year><Month>Jul</Month><Day>15</Day></PubDate></JournalIssue></Journal>
+      <Abstract><AbstractText>Before <b>bold evidence</b> and after.</AbstractText></Abstract>
+      <AuthorList>
+        <Author><LastName>Smith</LastName><ForeName>Jane Alice</ForeName><Initials>JA</Initials><AffiliationInfo><Affiliation>UT Southwestern Medical Center, Dallas</Affiliation></AffiliationInfo></Author>
+        <Author><LastName>Doe</LastName><ForeName>John B</ForeName><Initials>JB</Initials><AffiliationInfo><Affiliation>UT Southwestern, Dallas</Affiliation></AffiliationInfo></Author>
+      </AuthorList>
+      <PublicationTypeList><PublicationType>Journal Article</PublicationType><PublicationType>Clinical Trial</PublicationType></PublicationTypeList>
+    </Article></MedlineCitation>
+    <PubmedData><ArticleIdList><ArticleId IdType="doi">10.1234/example</ArticleId></ArticleIdList></PubmedData>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation><PMID>1002</PMID><Article>
+      <ArticleTitle>A different person's institution</ArticleTitle>
+      <Journal><Title>Example Journal</Title><JournalIssue><PubDate><Year>2026</Year><Month>Sep</Month></PubDate></JournalIssue></Journal>
+      <AuthorList>
+        <Author><LastName>Smith</LastName><ForeName>Jane A</ForeName><Initials>JA</Initials><AffiliationInfo><Affiliation>Other University</Affiliation></AffiliationInfo></Author>
+        <Author><LastName>Roe</LastName><ForeName>Alex</ForeName><Initials>A</Initials><AffiliationInfo><Affiliation>UT Southwestern</Affiliation></AffiliationInfo></Author>
+      </AuthorList>
+    </Article></MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation><PMID>1003</PMID><Article>
+      <ArticleTitle>Consortium evidence</ArticleTitle>
+      <Journal><Title>Example Journal</Title><JournalIssue><PubDate><Year>2026</Year><Month>8</Month></PubDate></JournalIssue></Journal>
+      <AuthorList><Author><CollectiveName>Example Consortium</CollectiveName></Author></AuthorList>
+    </Article><InvestigatorList><Investigator><LastName>Smith</LastName><ForeName>Jane A</ForeName><Initials>JA</Initials><AffiliationInfo><Affiliation>UTSW</Affiliation></AffiliationInfo></Investigator></InvestigatorList></MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation><PMID>1004</PMID><Article>
+      <ArticleTitle>Initials need review</ArticleTitle>
+      <Journal><Title>Example Journal</Title><JournalIssue><PubDate><Year>2026</Year><Month>9</Month></PubDate></JournalIssue></Journal>
+      <AuthorList><Author><LastName>Smith</LastName><Initials>JA</Initials><AffiliationInfo><Affiliation>UTSW</Affiliation></AffiliationInfo></Author></AuthorList>
+    </Article></MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation><PMID>1005</PMID><Article>
+      <ArticleTitle>Year-only sole author</ArticleTitle>
+      <Journal><Title>Example Journal</Title><JournalIssue><PubDate><Year>2026</Year></PubDate></JournalIssue></Journal>
+      <AuthorList><Author><LastName>Doe</LastName><ForeName>John B</ForeName><Initials>JB</Initials><AffiliationInfo><Affiliation>UTSW</Affiliation></AffiliationInfo></Author></AuthorList>
+    </Article></MedlineCitation>
+  </PubmedArticle>
+</PubmedArticleSet>

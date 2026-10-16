@@ -1,0 +1,17 @@
+[SETTINGS]
+key	value
+starting_date	
+ending_date	
+last_run_utc	
+history_start_date	
+ncbi_tool	pubmed-author-tracker
+ncbi_email	your-email@example.com
+themes_enabled	false
+gemini_model	
+theme_max_papers	100
+
+[AUTHORS]
+full_name	other_names	affiliations	orcid
+Jane A Smith	Jane Smith|Smith JA|Smith J	UT Southwestern|UTSW	
+John B Doe	John Doe|Doe JB|Doe J	UT Southwestern|UTSW	
+Ada Zero	Zero A	UT Southwestern|UTSW	
