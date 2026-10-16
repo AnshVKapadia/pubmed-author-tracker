@@ -1,12 +1,12 @@
 # Publication tracker: audit and implementation plan
 
-Audited October 16, 2026. The baseline findings below informed the implementation. The owner selected Google Sheets, retained history, and quarterly summaries.
+Audited October 16, 2026. The baseline findings below informed the implementation. **The current direction supersedes the historical plan below:** keep one Master for the selected publication-date range, do not retain cumulative history, and use the reporting period for autonomous email summaries.
 
 ## Implementation status
 
-The tracker has been split into testable modules; core dependencies are pinned with a tested full lock; Google Sheets publication is atomic; history retains every faculty-paper match and manual decision; AI is optional; and CI plus the quarterly workflow have been rewritten. See README.md for current behavior.
+The tracker has been split into testable modules; core dependencies are pinned with a tested lock; publication is atomic; AI is optional; and CI checks both supported Python versions. Master is rebuilt from fresh PubMed searches for the selected date range. Generated history, quarterly, faculty-summary, and individual-author worksheets are removed on publication; unrelated custom tabs are preserved. The adjustable reporting interval defaults to three calendar months. See README.md for current behavior.
 
-Validation completed: 35 regression tests in a clean Python 3.13 environment, a successful live PubMed dry run against the actual Config roster, and a full atomic publish to a separate copy of the workbook, followed by readback of summary metrics, history count, faculty rows, and PubMed hyperlinks. A known shared paper now credits all five configured faculty involved. The production workbook and checkpoint have not been changed.
+The original history-based preview passed 35 tests and test-copy publication. The simplified current-window implementation passes 44 Python tests plus mocked email checks, including exclusion of the reported 2024 paper from a July–September 2026 report. A fresh live PubMed dry run confirms the selected-period search without reading earlier publication tables as input. The production workbook has not been changed.
 
 The original Apps Script source and triggers were not located in the repository, accessible Drive files, or the connected inbox's Apps Script notifications. apps-script/ contains an explicitly labeled optional replacement and recovery instructions; no recipients or triggers have been enabled. GitHub-hosted workflow verification and production service-account validation remain separate from the connector-based test-copy publication.
 

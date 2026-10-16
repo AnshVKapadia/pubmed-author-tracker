@@ -37,5 +37,7 @@ jobs:
         run: python -m pip check
       - name: Regression tests (no credentials or network)
         run: python -m unittest discover -s tests -v
+      - name: Check email scheduling with mocked Google services
+        run: node tests/test_email.js
       - name: Verify offline entry point
         run: python src/script.py --config examples/Config.tsv --pubmed-xml tests/fixtures/pubmed.xml --quarter 2026-Q3 --dry-run

@@ -16,8 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from tracker.config import Author, collection_window, parse_config, previous_quarter, quarter_window
 from tracker.matching import accepted, match_article, merge_history
 from tracker.pubmed import PubMedClient, PubMedError, build_query, parse_articles, parse_publication_date
-from tracker.reports import analyze, build_reports, quarter_for, summary_table
-from tracker.sheets import SheetsStore, build_publish_request, checkpoint_request, history_from_snapshot
+from tracker.reports import analyze, build_reports, quarter_for, date_membership
+from tracker.sheets import SheetsStore, build_publish_request, checkpoint_request, report_setting_requests
 from tracker.themes import extract_themes
 from tracker.cli import parser, run
 
@@ -54,17 +54,6 @@ class TrackerTests(unittest.TestCase):
         for module in ("config", "matching", "pubmed", "reports", "sheets", "themes", "cli"):
             importlib.import_module("tracker." + module)
 
-    def test_shared_publication_credits_each_faculty_once(self):
-        report = build_reports(self.history, self.authors, "2026-Q3", NOW)
-        analytics = report["analytics"]
-        self.assertEqual(2, analytics["total_articles"])
-        self.assertEqual({"Jane A Smith": 2, "John B Doe": 1, "Ada Zero": 0}, analytics["faculty_counts"])
-        self.assertEqual(3, analytics["cumulative_total_articles"])
-        master = report["tables"]["Master"][1]
-        self.assertEqual(3, len(master))
-        shared = next(r for r in master if r["pmid"] == "1001")
-        self.assertIn("Jane A Smith", shared["tracked_author"])
-        self.assertIn("John B Doe", shared["tracked_author"])
 
     def test_other_person_cannot_validate_affiliation(self):
         row = match_article(self.articles["1002"], self.authors[0])
@@ -122,7 +111,7 @@ class TrackerTests(unittest.TestCase):
         self.assertEqual(0, report["analytics"]["per_faculty"]["median"])
         self.assertEqual(3, report["analytics"]["faculty_count"])
         json.dumps(report["analytics"], allow_nan=False)
-        self.assertEqual([], report["tables"]["Ada Zero"][1])
+        self.assertEqual({"Master"}, set(report["tables"]))
 
     def test_zero_faculty_counts_in_percentages(self):
         report = analyze([r for r in self.history if accepted(r)], self.authors)
@@ -164,7 +153,7 @@ class TrackerTests(unittest.TestCase):
         self.assertEqual(date(2025, 3, 31), last)
 
     def test_invalid_dates_and_configuration_fail_early(self):
-        for config in ({"ending_date": "2026-01-01"}, {"starting_date": "2026-12-01"}, {"last_run_utc": "2026-12-01T00:00:00+00:00"}):
+        for config in ({"ending_date": "2026-01-01"}, {"starting_date": "2026-12-01"}):
             with self.assertRaises(ValueError):
                 collection_window(config, date(2026, 10, 16))
         for row in (["Master", "", "UTSW"], ["Ada Zero", "", "UTSW"]):
@@ -185,29 +174,7 @@ class TrackerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             checkpoint_request([["[SETTINGS]"], ["[AUTHORS]"]], NOW, 0)
 
-    def test_legacy_migration_recovers_faculty_tabs(self):
-        data = snapshot()
-        data["tables"].update({"Master": [["pmid", "tracked_author"], ["1001", "Jane A Smith"]],
-                               "John B Doe": [["pmid", "tracked_author"], ["1001", "John B Doe"]]})
-        migrated = merge_history(history_from_snapshot(data, self.authors), [], NOW)
-        self.assertEqual(2, len(migrated))
-        self.assertTrue(all(not accepted(r) for r in migrated))
 
-    def test_atomic_batch_contains_checkpoint_and_clears_empty_tabs(self):
-        data = snapshot()
-        data["tables"]["Ada Zero"] = [["pmid", "tracked_author"], ["1000", "Ada Zero"]]
-        data["metadata"]["sheets"].append({"properties": {"title": "Ada Zero", "sheetId": 10,
-                                                          "gridProperties": {"rowCount": 2, "columnCount": 2}}})
-        report = build_reports(self.history, self.authors, "2026-Q3", NOW)
-        report["tables"]["Summary"] = summary_table(report["analytics"])
-        body = build_publish_request(data, report["tables"], NOW, True)
-        updates = [r["updateCells"] for r in body["requests"] if "updateCells" in r]
-        empty = next(r for r in updates if r["range"]["sheetId"] == 10)
-        self.assertEqual(2, len(empty["rows"]))
-        self.assertTrue(all(not cell for cell in empty["rows"][1]["values"]))
-        self.assertEqual(2, empty["range"]["endRowIndex"])
-        self.assertEqual(0, updates[-1]["range"]["sheetId"])
-        self.assertGreater(len(body["requests"]), 5)
 
     def test_custom_columns_and_formulas_block_overwrite(self):
         report = build_reports([], self.authors, "2026-Q3", NOW)
@@ -237,9 +204,11 @@ class TrackerTests(unittest.TestCase):
         query = build_query(self.authors[0], date(2026, 7, 1), date(2026, 9, 30))
         self.assertIn("[au]", query)
         self.assertIn("[ir]", query)
-        self.assertIn("[crdt]", query)
+        self.assertIn("[dp]", query)
+        self.assertNotIn("[crdt]", query)
         self.assertIn('"Smith JA"[au]', query)
-        self.assertIn('"UTSW"[ad]', query)
+        self.assertIn('"utsw"[ad]', query)
+        self.assertIn('"southwestern"[ad]', query)
 
     def test_collection_failure_never_calls_publisher(self):
         (ROOT / "out").mkdir(exist_ok=True)
@@ -258,9 +227,8 @@ class TrackerTests(unittest.TestCase):
         store.sh = Mock()
         store.sh.values_get.return_value = {"values": [["changed during collection"]]}
         report = build_reports([], self.authors, "2026-Q3", NOW)
-        report["tables"]["Summary"] = summary_table(report["analytics"])
         with self.assertRaises(RuntimeError):
-            store.publish(snapshot(), report["tables"], NOW, True)
+            store.publish(snapshot(), report["tables"], NOW, True, report["analytics"])
         store.sh.batch_update.assert_not_called()
 
     def test_successful_publish_uses_one_atomic_batch(self):
@@ -270,8 +238,7 @@ class TrackerTests(unittest.TestCase):
         store.sh.values_get.return_value = {"values": data["tables"]["Config"]}
         store._published = Mock(return_value=True)
         report = build_reports([], self.authors, "2026-Q3", NOW)
-        report["tables"]["Summary"] = summary_table(report["analytics"])
-        store.publish(data, report["tables"], NOW, True)
+        store.publish(data, report["tables"], NOW, True, report["analytics"])
         store.sh.batch_update.assert_called_once()
         final_request = store.sh.batch_update.call_args.args[0]["requests"][-1]
         self.assertEqual(0, final_request["updateCells"]["range"]["sheetId"])
@@ -318,23 +285,6 @@ class TrackerTests(unittest.TestCase):
             result = extract_themes(list(self.articles.values()), {"themes_enabled": "true", "gemini_model": "example"}, "dummy")
         self.assertEqual("unavailable", result["status"])
 
-    def test_cli_offline_end_to_end_and_rerun(self):
-        (ROOT / "out").mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=ROOT / "out") as temporary:
-            args = [sys.executable, str(ROOT / "src/script.py"), "--config", str(ROOT / "examples/Config.tsv"),
-                    "--pubmed-xml", str(FIXTURE), "--quarter", "2026-Q3", "--output", temporary]
-            first = subprocess.run(args, capture_output=True, text=True, encoding="utf-8")
-            self.assertEqual(0, first.returncode, first.stderr)
-            output = Path(temporary)
-            analytics = json.loads((output / "analytics.json").read_text(encoding="utf-8"))
-            self.assertEqual(2, analytics["total_articles"])
-            self.assertEqual("dry_run", analytics["mode"])
-            with (output / "history.csv").open(encoding="utf-8", newline="") as handle:
-                original = list(csv.DictReader(handle))
-            second = subprocess.run(args + ["--history", str(output / "history.csv")], capture_output=True, text=True, encoding="utf-8")
-            self.assertEqual(0, second.returncode, second.stderr)
-            with (output / "history.csv").open(encoding="utf-8", newline="") as handle:
-                self.assertEqual(len(original), len(list(csv.DictReader(handle))))
 
     def test_cli_refuses_publishing_fixtures(self):
         result = subprocess.run([sys.executable, str(ROOT / "src/script.py"), "--config", str(ROOT / "examples/Config.tsv"),

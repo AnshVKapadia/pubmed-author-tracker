@@ -1,9 +1,10 @@
-"""Derive publication-level and faculty-level reports from cumulative history."""
+"""Build a fresh Master for one publication-date window."""
 
 from __future__ import annotations
 
 from collections import Counter
 from datetime import date
+import calendar
 import csv
 import json
 from pathlib import Path
@@ -56,60 +57,64 @@ def analyze(matches: list[dict], authors: list[Author]) -> dict:
             "article_types": dict(types.most_common()), "faculty_counts": counts}
 
 
-def build_reports(history: list[dict], authors: list[Author], report_quarter: str, timestamp: str) -> dict:
-    start, end = quarter_window(report_quarter)
+def date_membership(row: dict, start: date, end: date) -> str:
+    value = str(row.get("pub_date", ""))
+    try:
+        if len(value) == 10:
+            first = last = date.fromisoformat(value)
+        elif len(value) == 7:
+            first = date.fromisoformat(value + "-01")
+            last = date(first.year, first.month, calendar.monthrange(first.year, first.month)[1])
+        elif len(value) == 4 and value.isdigit():
+            first, last = date(int(value), 1, 1), date(int(value), 12, 31)
+        else:
+            return "uncertain"
+    except ValueError:
+        raise ValueError("Publication dates must use YYYY, YYYY-MM, or YYYY-MM-DD.") from None
+    if last < start or first > end:
+        return "outside"
+    return "inside" if start <= first and last <= end else "uncertain"
+
+
+def build_reports(matches: list[dict], authors: list[Author], period: str, timestamp: str,
+                  end_date: date | None = None) -> dict:
+    # --quarter remains a shortcut; all outputs use this same selected window.
+    start, end = quarter_window(period) if end_date is None else (date.fromisoformat(period), end_date)
     roster = {normalize(a.full_name) for a in authors}
-    selected = [r for r in history if normalize(r["tracked_author"]) in roster]
-    approved = [r for r in selected if accepted(r)]
-    current = [r for r in approved if quarter_for(r) == report_quarter]
-    analytics = analyze(current, authors)
-    analytics.update(report_quarter=report_quarter, report_start=start.isoformat(), report_end=end.isoformat(),
-                     generated_at_utc=timestamp, period_months=3,
-                     cumulative_total_articles=len(publication_rows(approved)),
-                     unassigned_date_articles=len({r["pmid"] for r in approved if not quarter_for(r)}),
-                     review_matches=sum(not accepted(r) and r.get("decision") != "reject" for r in selected))
-    quarters = sorted({quarter_for(r) for r in approved if quarter_for(r)} | {report_quarter})
-    quarterly = []
-    for label in quarters:
-        summary = analyze([r for r in approved if quarter_for(r) == label], authors)
-        quarterly.append({"quarter": label, "total_articles": summary["total_articles"],
-                          "faculty_with_publications": sum(v > 0 for v in summary["faculty_counts"].values()),
-                          "faculty_count": len(authors), "median_per_faculty": summary["per_faculty"]["median"],
-                          **summary["authorship"]})
-    tables = {"History": (HISTORY_COLUMNS, history),
-              "Master": (BASE_COLUMNS + ["pub_date"], publication_rows(approved)),
-              "Low Confidence Articles": (HISTORY_COLUMNS, [r for r in selected if not accepted(r)]),
-              "Quarterly Summary": (["quarter", "total_articles", "faculty_with_publications", "faculty_count",
-                                     "median_per_faculty", "first_author_publications", "last_author_publications"], quarterly),
-              "Faculty Summary": (["tracked_author", "report_quarter", "publications", "cumulative_publications"], [
-                  {"tracked_author": a.full_name, "report_quarter": report_quarter,
-                   "publications": analytics["faculty_counts"][a.full_name],
-                   "cumulative_publications": len({r["pmid"] for r in approved if normalize(r["tracked_author"]) == normalize(a.full_name)})}
-                  for a in authors])}
-    for author in authors:
-        tables[author.full_name] = (HISTORY_COLUMNS, [r for r in approved if normalize(r["tracked_author"]) == normalize(author.full_name)])
-    return {"analytics": analytics, "tables": tables, "papers_for_themes": publication_rows(current)}
-
-
-def summary_table(analytics: dict) -> tuple[list[str], list[dict]]:
-    keys = ["schema_version", "run_status", "report_quarter", "report_start", "report_end", "generated_at_utc",
-            "total_articles", "cumulative_total_articles", "review_matches", "analytics_json"]
-    values = {**analytics, "schema_version": 1, "run_status": "complete",
-              "analytics_json": json.dumps(analytics, ensure_ascii=False, allow_nan=False, separators=(",", ":"))}
-    return ["key", "value"], [{"key": key, "value": values[key]} for key in keys]
+    selected = []
+    uncertain_dates = set()
+    for original in matches:
+        if normalize(original["tracked_author"]) not in roster:
+            continue
+        membership = date_membership(original, start, end)
+        if membership == "outside":
+            continue
+        row = dict(original)
+        if membership == "uncertain":
+            uncertain_dates.add(row["pmid"])
+            row["status"] += " + NEEDS REVIEW (publication date not precise enough)"
+        selected.append(row)
+    approved = [r for r in selected if accepted(r) and date_membership(r, start, end) == "inside"]
+    review = [r for r in selected if not accepted(r) or date_membership(r, start, end) != "inside"]
+    analytics = analyze(approved, authors)
+    analytics.update(report_start=start.isoformat(), report_end=end.isoformat(),
+                     period_key=f"{start.isoformat()}/{end.isoformat()}", generated_at_utc=timestamp,
+                     unassigned_date_articles=len(uncertain_dates),
+                     review_matches=len(review))
+    tables = {"Master": (BASE_COLUMNS + ["pub_date"], publication_rows(approved))}
+    return {"analytics": analytics, "tables": tables,
+            "review": review,
+            "papers_for_themes": publication_rows(approved)}
 
 
 def write_reports(report: dict, output: Path, snapshot: dict | None = None) -> None:
     output.mkdir(parents=True, exist_ok=True)
-    names = {"History": "history", "Master": "master", "Low Confidence Articles": "review",
-             "Quarterly Summary": "quarterly", "Faculty Summary": "faculty", "Summary": "summary",
-             "History Backup": "history-before"}
-    for title, filename in names.items():
-        columns, rows = report["tables"][title]
+    columns, rows = report["tables"]["Master"]
+    for filename, fields, data in (("master", columns, rows), ("review", HISTORY_COLUMNS, report["review"])):
         with (output / f"{filename}.csv").open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
+            writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
             writer.writeheader()
-            writer.writerows(rows)
+            writer.writerows(data)
     (output / "analytics.json").write_text(json.dumps(report["analytics"], indent=2, ensure_ascii=False, allow_nan=False), encoding="utf-8")
     if snapshot is not None:
         (output / "sheets-backup.json").write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")

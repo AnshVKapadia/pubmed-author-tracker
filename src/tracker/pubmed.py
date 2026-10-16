@@ -10,7 +10,7 @@ import xml.etree.ElementTree as ET
 
 import requests
 
-from .config import Author
+from .config import Author, normalize
 
 BASE_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 
@@ -31,7 +31,15 @@ def build_query(author: Author, start: date, end: date) -> str:
         (initials if is_initials else full_names).append(name)
     full_query = " OR ".join(f'"{name}"[au] OR "{name}"[ir]' for name in full_names)
     initial_query = " OR ".join(f'"{name}"[au] OR "{name}"[ir]' for name in initials)
-    affiliation_query = " OR ".join(f'"{word}"[ad]' for word in author.affiliations)
+    # Match institutional words across punctuation and wording separators. A
+    # quoted phrase misses e.g. "University of Texas, Southwestern". The local
+    # person-level check still determines whether the affiliation is acceptable.
+    institution_terms = []
+    for institution in author.affiliations:
+        words = [w for w in normalize(institution).split() if w not in {"of", "the", "and", "for", "at", "in"}]
+        if words:
+            institution_terms.append("(" + " AND ".join(f'"{word}"[ad]' for word in words) + ")")
+    affiliation_query = " OR ".join(institution_terms)
     # Broad initials identify thousands of unrelated people. Require an article-
     # level institutional clue only for these searches; full names still retrieve
     # missing-affiliation records. Match each person's own affiliation afterward.
@@ -42,7 +50,7 @@ def build_query(author: Author, start: date, end: date) -> str:
     if not names:
         raise ValueError(f"Provide a full name or institutional keywords for {author.full_name}.")
     first, last = start.strftime("%Y/%m/%d"), end.strftime("%Y/%m/%d")
-    return f'({names}) AND (("{first}"[dp]:"{last}"[dp]) OR ("{first}"[crdt]:"{last}"[crdt]))'
+    return f'({names}) AND ("{first}"[dp]:"{last}"[dp])'
 
 
 class PubMedClient:

@@ -1,4 +1,4 @@
-"""Snapshot reads, conservative legacy migration, and atomic Sheets publishing."""
+"""Snapshot reads and atomic replacement of the current Master report."""
 
 from __future__ import annotations
 
@@ -23,31 +23,6 @@ def records(values: list[list], title: str) -> list[dict]:
             if len(row) > len(headers) or any(not h and i < len(row) and str(row[i]).strip() for i, h in enumerate(headers)):
                 raise ValueError(f"Unlabelled data in {title}; no data will be overwritten.")
             result.append({h: str(row[i]) if i < len(row) else "" for i, h in enumerate(headers) if h})
-    return result
-
-
-def history_from_snapshot(snapshot: dict, authors: list) -> list[dict]:
-    tables = snapshot["tables"]
-    if "History" in tables:
-        values = tables["History"]
-        if not values or not {"pmid", "tracked_author", "decision"}.issubset(values[0]):
-            raise ValueError("History exists but does not have the tracker schema. Restore its headers before running.")
-        return records(values, "History")
-    result = []
-    titles = ["Master", "Low Confidence Articles", *(a.full_name for a in authors)]
-    for title in titles:
-        values = tables.get(title, [])
-        if not values:
-            continue
-        rows = records(values, title)
-        if rows and not {"pmid", "tracked_author"}.issubset(values[0]):
-            raise ValueError(f"Cannot migrate {title}: expected pmid and tracked_author headers.")
-        for row in rows:
-            # Revalidate old automatic matches before treating them as confirmed.
-            row["status"] = "NEEDS REVIEW (legacy record awaiting metadata refresh)"
-            row["decision"] = row.get("decision") or "auto"
-            row["pub_date"] = row.get("pub_date") or row.get("pub_year", "")
-            result.append(row)
     return result
 
 
@@ -94,7 +69,43 @@ def cell(value) -> dict:
     return result
 
 
-def build_publish_request(snapshot: dict, tables: dict, timestamp: str, advance_checkpoint: bool) -> dict:
+def report_setting_requests(values: list[list], serialized: str, sheet_id: int, setting_key: str = "last_report_json") -> list[dict]:
+    in_settings = False
+    empty = None
+    insertion = None
+    target = None
+    for index, row in enumerate(values):
+        key = str(row[0]).strip() if row else ""
+        if key == "[SETTINGS]":
+            in_settings = True
+        elif key == "[AUTHORS]":
+            insertion = index
+            break
+        elif in_settings and key == setting_key:
+            target = index
+            break
+        elif in_settings and not any(str(v).strip() for v in row) and empty is None:
+            empty = index
+    requests = []
+    if target is None:
+        target = empty
+    if target is None:
+        if insertion is None:
+            raise ValueError("Config needs [SETTINGS] and [AUTHORS] sections.")
+        target = insertion
+        values.insert(target, [])
+        requests.append({"insertDimension": {"range": {"sheetId": sheet_id, "dimension": "ROWS",
+                                                      "startIndex": target, "endIndex": target + 1},
+                                              "inheritFromBefore": True}})
+    requests.append({"updateCells": {"range": {"sheetId": sheet_id, "startRowIndex": target,
+                                                "endRowIndex": target + 1, "startColumnIndex": 0, "endColumnIndex": 2},
+                                      "rows": [{"values": [cell(setting_key), cell(serialized)]}],
+                                      "fields": "userEnteredValue"}})
+    values[target] = [setting_key, serialized, *values[target][2:]]
+    return requests
+
+
+def build_publish_request(snapshot: dict, tables: dict, timestamp: str, advance_checkpoint: bool, report: dict | None = None) -> dict:
     metadata = {s["properties"]["title"]: s["properties"] for s in snapshot["metadata"]["sheets"]}
     next_id = max((v["sheetId"] for v in metadata.values()), default=0) + 1
     # Google sheet IDs are non-negative signed 32-bit integers.
@@ -102,12 +113,14 @@ def build_publish_request(snapshot: dict, tables: dict, timestamp: str, advance_
         next_id = 1
     allocated_ids = {v["sheetId"] for v in metadata.values()}
     requests = []
+    config_values = copy.deepcopy(snapshot["tables"]["Config"])
     for title, (columns, rows) in tables.items():
         previous = snapshot["tables"].get(title, [])
         if previous:
+            records(previous, title)
             extra_headers = set(str(h) for h in previous[0] if h) - set(columns)
             if extra_headers:
-                raise ValueError(f"{title} contains custom columns. Move them to a separate tab or History.review_notes before publishing.")
+                raise ValueError(f"{title} contains custom columns. Move them to a separate tab or a notes column outside the managed report before publishing.")
             if any(str(value).startswith("=") for row in previous for value in row):
                 raise ValueError(f"{title} contains formulas. Move them to a separate tab before publishing.")
         needed_rows, needed_cols = len(rows) + 1, len(columns)
@@ -139,8 +152,28 @@ def build_publish_request(snapshot: dict, tables: dict, timestamp: str, advance_
         requests.append({"setBasicFilter": {"filter": {"range": {"sheetId": sheet_id, "startRowIndex": 0,
                                                                   "endRowIndex": needed_rows, "startColumnIndex": 0,
                                                                   "endColumnIndex": needed_cols}}}})
+    if report is not None:
+        _, authors = parse_config(snapshot["tables"]["Config"])
+        obsolete = (OUTPUT_TITLES - {"Master"}) | {a.full_name for a in authors}
+        known_headers = {"quarter", "total_articles", "faculty_with_publications", "faculty_count",
+                         "median_per_faculty", "first_author_publications", "last_author_publications",
+                         "key", "value", "report_quarter", "publications", "cumulative_publications"}
+        from .matching import HISTORY_COLUMNS
+        known_headers.update(HISTORY_COLUMNS)
+        for title in sorted(obsolete & metadata.keys()):
+            old_values = snapshot["tables"].get(title, [])
+            records(old_values, title)  # Reject unlabelled data before deleting a generated legacy tab.
+            if old_values and (set(str(c) for c in old_values[0] if c) - known_headers or
+                               any(str(c).startswith("=") for row in old_values for c in row)):
+                raise ValueError(f"{title} has custom content. Move it to a separate tab before removing legacy reports.")
+            requests.append({"deleteSheet": {"sheetId": metadata[title]["sheetId"]}})
+        serialized = json.dumps(report, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        requests.extend(report_setting_requests(config_values, serialized, metadata["Config"]["sheetId"]))
+        settings, _ = parse_config(config_values)
+        if not settings.get("report_interval_months"):
+            requests.extend(report_setting_requests(config_values, "3", metadata["Config"]["sheetId"], "report_interval_months"))
     if advance_checkpoint:
-        requests.append(checkpoint_request(snapshot["tables"]["Config"], timestamp, metadata["Config"]["sheetId"]))
+        requests.append(checkpoint_request(config_values, timestamp, metadata["Config"]["sheetId"]))
     body = {"requests": requests}
     if len(json.dumps(body).encode("utf-8")) > 8 * 1024 * 1024:
         raise ValueError("Atomic publication exceeds 8 MiB. Local reports are saved; reduce output before publishing.")
@@ -197,18 +230,18 @@ class SheetsStore:
         tables["Config"] = config
         return {"metadata": metadata, "tables": tables}
 
-    def publish(self, snapshot: dict, tables: dict, timestamp: str, advance_checkpoint: bool) -> None:
+    def publish(self, snapshot: dict, tables: dict, timestamp: str, advance_checkpoint: bool, report: dict) -> None:
         import gspread
         import requests
-        body = build_publish_request(copy.deepcopy(snapshot), tables, timestamp, advance_checkpoint)
+        body = build_publish_request(copy.deepcopy(snapshot), tables, timestamp, advance_checkpoint, report)
         # Recheck human-editable input immediately before the atomic mutation.
-        for title in ("Config", "History"):
+        for title in ("Config", "Master"):
             if title in snapshot["tables"]:
                 current = self.read_retry(lambda title=title: self.sh.values_get(quote_title(title),
                                           params={"valueRenderOption": "FORMULA"})).get("values", [])
                 if current != snapshot["tables"][title]:
                     raise RuntimeError(f"{title} changed during collection. Rerun to preserve the latest edits.")
-        expected = next(row["value"] for row in tables["Summary"][1] if row["key"] == "analytics_json")
+        expected = json.dumps(report, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
         for attempt in range(5):
             try:
                 self.sh.batch_update(body)
@@ -223,18 +256,18 @@ class SheetsStore:
                 # A server error may follow an applied request; verify instead of
                 # retrying addSheet operations and risking duplicate-sheet errors.
                 if not self._published(expected):
-                    raise RuntimeError("Sheets publication could not be confirmed. Inspect Summary before retrying; local reports are saved.") from None
+                    raise RuntimeError("Sheets publication could not be confirmed. Inspect Config.last_report_json before retrying; local reports are saved.") from None
                 return
             except (requests.ConnectionError, requests.Timeout):
                 if not self._published(expected):
-                    raise RuntimeError("Sheets connection interrupted during publication. Inspect Summary before retrying.") from None
+                    raise RuntimeError("Sheets connection interrupted during publication. Inspect Config.last_report_json before retrying.") from None
                 return
         if not self._published(expected):
-            raise RuntimeError("Sheets publish verification failed; inspect Summary and rerun if necessary.")
+            raise RuntimeError("Sheets publish verification failed; inspect Config.last_report_json and rerun if necessary.")
 
     def _published(self, expected: str) -> bool:
         try:
-            values = self.read_retry(lambda: self.sh.values_get(quote_title("Summary"))).get("values", [])
-            return any(len(row) > 1 and row[0] == "analytics_json" and row[1] == expected for row in values)
+            values = self.read_retry(lambda: self.sh.values_get(quote_title("Config"))).get("values", [])
+            return any(len(row) > 1 and row[0] == "last_report_json" and row[1] == expected for row in values)
         except RuntimeError:
             return False

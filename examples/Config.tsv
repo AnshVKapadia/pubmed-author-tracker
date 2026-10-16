@@ -3,7 +3,7 @@ key	value
 starting_date	
 ending_date	
 last_run_utc	
-history_start_date	
+report_interval_months	3
 ncbi_tool	pubmed-author-tracker
 ncbi_email	your-email@example.com
 themes_enabled	false

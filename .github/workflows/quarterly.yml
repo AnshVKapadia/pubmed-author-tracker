@@ -1,8 +1,8 @@
-name: Quarterly PubMed Update
+name: PubMed Update
 
 on:
   schedule:
-    - cron: "17 6 1 1,4,7,10 *"
+    - cron: "17 6 * * *"  # Check daily; Config determines when a report is due.
   workflow_dispatch:
     inputs:
       publish:
@@ -10,13 +10,13 @@ on:
         type: boolean
         default: false
       start_date:
-        description: "Optional backfill start: YYYY-MM-DD"
+        description: "Optional report start: YYYY-MM-DD"
         type: string
       end_date:
-        description: "Optional backfill end: YYYY-MM-DD (requires start)"
+        description: "Optional report end: YYYY-MM-DD (requires start)"
         type: string
       report_quarter:
-        description: "Optional summary quarter: YYYY-Qn"
+        description: "Optional report quarter: YYYY-Qn"
         type: string
       themes:
         description: "Enable optional Gemini themes for this run"
@@ -49,6 +49,8 @@ jobs:
         run: python -m pip install -r requirements.txt -c requirements.lock
       - name: Run regression tests before collection
         run: python -m unittest discover -s tests -v
+      - name: Check email scheduling with mocked Google services
+        run: node tests/test_email.js
       - name: Install optional Gemini support when a key is configured
         continue-on-error: true
         env:
@@ -63,6 +65,7 @@ jobs:
           GOOGLE_APPLICATION_CREDENTIALS_JSON: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_JSON }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          SCHEDULED: ${{ github.event_name == 'schedule' }}
           PUBLISH: ${{ github.event_name == 'schedule' || inputs.publish }}
           START_DATE: ${{ inputs.start_date }}
           END_DATE: ${{ inputs.end_date }}
@@ -71,6 +74,7 @@ jobs:
         shell: bash
         run: |
           args=()
+          if [ "$SCHEDULED" = "true" ]; then args+=(--scheduled); fi
           if [ "$PUBLISH" = "true" ]; then args+=(--publish); else args+=(--dry-run); fi
           if [ -n "$START_DATE" ]; then args+=(--start "$START_DATE"); fi
           if [ -n "$END_DATE" ]; then args+=(--end "$END_DATE"); fi

@@ -59,7 +59,7 @@ def parse_config(values: list[list[str]]) -> tuple[dict[str, str], list[Author]]
         else:
             raise ValueError("Config must begin with [SETTINGS] or [AUTHORS].")
     validate_authors(authors)
-    for key in ("starting_date", "ending_date", "history_start_date"):
+    for key in ("starting_date", "ending_date"):
         if settings.get(key):
             parse_date(settings[key])
     if settings.get("last_run_utc"):
@@ -69,6 +69,9 @@ def parse_config(values: list[list[str]]) -> tuple[dict[str, str], list[Author]]
         raise ValueError("theme_max_papers must be blank or an integer between 1 and 500.")
     if settings.get("themes_enabled", "false").casefold() not in {"true", "false"}:
         raise ValueError("themes_enabled must be true or false.")
+    interval = settings.get("report_interval_months") or "3"
+    if interval not in {"1", "2", "3", "4", "6", "12"}:
+        raise ValueError("report_interval_months must be 1, 2, 3, 4, 6, or 12 (blank defaults to 3).")
     return settings, authors
 
 
@@ -135,16 +138,13 @@ def collection_window(settings: dict, today: date, start: str | None = None,
         first, last = parse_date(manual_start), parse_date(manual_end) if manual_end else today
         checkpoint = False
     else:
-        last = today
-        if settings.get("last_run_utc"):
-            checkpoint_day = parse_timestamp(settings["last_run_utc"]).date()
-            if checkpoint_day > today:
-                raise ValueError("last_run_utc is in the future; correct Config before running.")
-            first = checkpoint_day - timedelta(days=91)
-        else:
-            first = quarter_window(previous_quarter(today))[0]
-        if settings.get("history_start_date"):
-            first = min(first, parse_date(settings["history_start_date"]))
+        months = int(settings.get("report_interval_months") or "3")
+        if months not in {1, 2, 3, 4, 6, 12}:
+            raise ValueError("report_interval_months must divide a calendar year.")
+        current_start = date(today.year, ((today.month - 1) // months) * months + 1, 1)
+        last = current_start - timedelta(days=1)
+        serial = current_start.year * 12 + current_start.month - 1 - months
+        first = date(serial // 12, serial % 12 + 1, 1)
         checkpoint = True
     if first > last or last > today:
         raise ValueError("Collection start must be on/before end, and end cannot be in the future.")
