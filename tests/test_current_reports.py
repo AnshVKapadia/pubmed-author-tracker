@@ -20,6 +20,7 @@ from tracker.cli import parser, run
 
 class CurrentReportTests(unittest.TestCase):
     def setUp(self):
+        (ROOT / "out").mkdir(exist_ok=True)
         _, self.authors = parse_config(configuration())
         articles = parse_articles(FIXTURE.read_text(encoding="utf-8"))
         self.rows = merge_history([], [row for a in articles.values() for person in self.authors
