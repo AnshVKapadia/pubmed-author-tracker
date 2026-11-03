@@ -1,12 +1,68 @@
 # PubMed Author Tracker
 
-A Google Sheets publication tracker with one current **Master** report and optional automated email summaries. Each run searches PubMed for the configured faculty and replaces Master with accepted publications from the selected date range. It does not maintain cumulative history or quarterly-summary worksheets.
+[![CI](https://github.com/AnshVKapadia/pubmed-author-tracker/actions/workflows/ci.yml/badge.svg)](https://github.com/AnshVKapadia/pubmed-author-tracker/actions/workflows/ci.yml)
+
+**Turn a faculty roster into a publication report, automatically.** This Python project searches PubMed, checks author identities and affiliations, and delivers a current publication list in Google Sheets. Configurable reporting periods and an optional email integration support recurring research summaries.
+
+## Why I built it
+
+Keeping track of a research group's publications means repeatedly searching names, checking affiliations, and removing duplicate papers. Names can be abbreviated, researchers can share a name, and several faculty members can coauthor the same paper. This tracker brings those tasks into a repeatable workflow that people can configure through a spreadsheet.
+
+## At a glance
+
+| Input | What the tracker does | Output |
+| --- | --- | --- |
+| Faculty names, aliases, and institutions | Searches PubMed and checks each person's affiliation | One Master sheet with unique publications |
+| A quarter or custom date range | Filters by publication date | A report restricted to that period |
+| A reporting interval | Checks when the next completed period is due | Automatic updates and optional email summaries |
+
+**Technology:** Python · PubMed / NCBI E-utilities · Google Sheets API · GitHub Actions · Google Apps Script. Gemini themes are optional.
+
+## How it works
+
+```mermaid
+flowchart LR
+    A[Faculty roster in Google Sheets] --> B[Python tracker]
+    C[PubMed] --> B
+    D[GitHub Actions schedule or manual run] --> B
+    B --> E[Name, affiliation, and date checks]
+    E --> F[Deduplicate by PubMed ID]
+    F --> G[Current Master sheet]
+    E --> H[Review CSV for uncertain matches]
+    G --> I[Optional scheduled email summary]
+```
+
+Each run rebuilds Master for the chosen period. A shared paper appears once, while each confirmed tracked coauthor receives credit in faculty statistics. Uncertain matches are withheld for review. Older results can be rebuilt by searching a wider date range.
+
+## Try it without a Google account
+
+After installing Python dependencies using the instructions below, run this included example:
+
+```bash
+python src/script.py --config examples/Config.tsv --pubmed-xml tests/fixtures/pubmed.xml --quarter 2026-Q3 --dry-run
+```
+
+It uses synthetic faculty and saved PubMed XML, so it needs no credentials or network access. Open `out/master.csv` for accepted papers, `out/review.csv` for uncertain matches, and `out/analytics.json` for counts and reporting metadata.
+
+## Engineering choices
+
+- **Identity checks:** checks each person's own affiliation rather than assuming every author belongs to an institution mentioned on a paper.
+- **Reproducible reports:** uses explicit date windows and deduplicates by PMID, PubMed's unique article identifier.
+- **Safe publication:** previews by default, stops when collection is incomplete, and updates Sheets in one atomic batch after checking for concurrent edits.
+- **Reliable collection:** paginates searches, splits oversized queries, limits request rates, and retries transient failures.
+- **Adjustable automation:** daily checks detect when a reporting period is due; manual runs do not queue email.
+
+CI runs 44 Python regression tests across Python 3.11 and 3.13, plus email checks using mocked Google services. These cover matching, dates, publishing, reporting intervals, and duplicate-email prevention.
+
+## Scope and limitations
+
+This is a publication-discovery tool, not a guarantee that every paper will be found. It depends on PubMed's coverage and metadata; ambiguous names, missing affiliations, and imprecise dates may require review. It keeps one current Master report rather than a permanent archive. Email delivery requires separate Apps Script authorization and recipient setup.
 
 ## Use it through GitHub
 
 1. Edit your spreadsheet's **Config** tab to manage faculty, name aliases, and affiliations.
 2. In the repository's **Actions** tab, open the workflow in `quarterly.yml` (now named **PubMed Update**).
-3. Select **Run workflow**. While the repair PR is unmerged, choose its branch, `codex/reliable-publication-tracker`.
+3. Select **Run workflow** and choose the `main` branch.
 4. Leave **Publish** unchecked to preview a run. Set **Report quarter** to `2026-Q3`, or leave it blank for the most recently completed reporting period. Leave Themes unchecked unless configured.
 5. Inspect the run summary and collection log. A dry run does not change Google Sheets or queue email.
 6. Check **Publish** only when ready to replace Master. The original Google credentials and spreadsheet ID remain supported.
@@ -56,7 +112,7 @@ Config's `last_report_json` is machine-managed: it records the current report an
 - PubMed searches publication dates, then the parsed publication date is checked again before inclusion. Records found outside the selected window are excluded even if an API search returns them.
 - Journal issue dates are used, with electronic date fallback when no journal month is available. An imprecise year/month must fit entirely inside the selected range. Otherwise the record is omitted from Master and listed in the local review CSV.
 
-The 2024 paper reported during testing is excluded from a July–September 2026 Master. It appears only if you explicitly request a date range that includes it.
+For example, a paper published in June 2024 is excluded from a July–September 2026 report, even if a search happens to return it.
 
 ## Matching and counts
 
@@ -111,3 +167,4 @@ GitHub CI tests Python 3.11 and 3.13 plus mocked email automation. Production re
 Install `requirements-ai.txt` with the lock constraints, set `themes_enabled=true` and a currently available `gemini_model` in Config, and provide `GEMINI_API_KEY`. `theme_max_papers` defaults to 100 when blank (maximum 500). `--themes` enables it for one manual run. Sampling and coverage are disclosed; a missing SDK, key, model, or provider failure does not stop publication tracking.
 
 The old tracked `config/*.yaml` and journal CSV are unused historical files. The editable roster lives in the spreadsheet's Config tab.
+
