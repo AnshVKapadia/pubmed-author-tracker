@@ -1,0 +1,43 @@
+name: Tracker checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements.lock
+      - name: Install the tested core dependencies
+        run: python -m pip install -r requirements.txt -c requirements.lock
+      - name: Check dependency consistency
+        run: python -m pip check
+      - name: Regression tests (no credentials or network)
+        run: python -m unittest discover -s tests -v
+      - name: Check email scheduling with mocked Google services
+        run: node tests/test_email.js
+      - name: Verify offline entry point
+        run: python src/script.py --config examples/Config.tsv --pubmed-xml tests/fixtures/pubmed.xml --quarter 2026-Q3 --dry-run
